@@ -1,0 +1,30 @@
+name: iOS CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData/SourcePackages
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project Bumpin.xcodeproj
+
+      - name: Build (simulator)
+        run: xcodebuild -project Bumpin.xcodeproj -scheme Bumpin -configuration Debug -destination 'generic/platform=iOS Simulator' build
