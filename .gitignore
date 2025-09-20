@@ -81,3 +81,4 @@ build/SourcePackages/
 
 # dataconnect generated files
 .dataconnect
+Bumpin/Configuration/AppSecrets.swift
