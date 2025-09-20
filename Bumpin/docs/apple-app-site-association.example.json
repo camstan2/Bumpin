@@ -1,0 +1,13 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "TEAMID.com.cameronstanley.Bumpin",
+        "paths": [ "/join/*" ]
+      }
+    ]
+  }
+}
+
+

@@ -1,0 +1,21 @@
+--swiftversion 5.10
+--indent 4
+--maxwidth 120
+--wraparguments before-first
+--wrapcollections before-first
+--stripunusedargs closure-only
+--stripunusedparams closure-only
+--self remove
+--importgrouping testable-last
+--binarygrouping none
+--hexgrouping none
+--commas inline
+--ranges nospace
+--ifdef no-indent
+--swiftversion 5.10
+--exclude Bumpin.xcodeproj,BumpinTests,BumpinUITests,firebase
+--indent 4
+--stripunusedargs closure-only
+--disable redundantSelf,trailingCommas,wrapArguments,wrapCollections
+--maxwidth 140
+

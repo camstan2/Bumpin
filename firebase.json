@@ -1,0 +1,13 @@
+{
+  "functions": { "source": "functions" },
+  "firestore": {
+    "rules": "firebase/firestore.rules",
+    "indexes": "Bumpin/firestore.indexes.json"
+  },
+  "emulators": {
+    "dataconnect": {
+      "dataDir": "dataconnect/.dataconnect/pgliteData"
+    }
+  },
+  "dataconnect": { "source": "dataconnect" }
+}

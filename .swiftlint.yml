@@ -1,0 +1,120 @@
+disabled_rules:
+  - trailing_whitespace
+  - identifier_name
+  - line_length
+
+opt_in_rules:
+  - attributes
+  - empty_count
+  - closure_spacing
+
+included:
+  - Bumpin
+
+excluded:
+  - build
+  - Bumpin.xcodeproj
+  - BumpinTests
+  - BumpinUITests
+
+reporter: "xcode"
+# SwiftLint configuration for Bumpin app
+
+# Opt-in rules
+opt_in_rules:
+  - array_init
+  - closure_spacing
+  - contains_over_first_not_nil
+  - empty_count
+  - empty_string
+  - explicit_init
+  - fatal_error_message
+  - first_where
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+  - missing_docs
+  - multiline_parameters
+  - operator_usage_whitespace
+  - overridden_super_call
+  - private_outlet
+  - prohibited_super_call
+  - redundant_nil_coalescing
+  - sorted_imports
+  - switch_case_on_newline
+  - trailing_closure
+  - unneeded_parentheses_in_closure_argument
+  - vertical_parameter_alignment_on_call
+  - vertical_whitespace_closing_braces
+  - vertical_whitespace_opening_braces
+
+# Disabled rules
+disabled_rules:
+  - trailing_whitespace # SwiftUI often needs trailing whitespace
+  - multiple_closures_with_trailing_closure # Common in SwiftUI
+  - type_body_length # Some view files need to be longer
+  - file_length # Some complex views might be longer
+
+# Customized rules
+line_length:
+  warning: 120
+  error: 150
+  ignores_comments: true
+  ignores_urls: true
+
+function_body_length:
+  warning: 50
+  error: 80
+
+type_name:
+  min_length: 3
+  max_length: 50
+
+identifier_name:
+  min_length: 2
+  max_length: 40
+  excluded:
+    - id
+    - db
+    - to
+    - vm
+    - vc
+
+cyclomatic_complexity:
+  warning: 12
+  error: 15
+
+nesting:
+  type_level:
+    warning: 2
+    error: 3
+
+# Custom SwiftUI rules
+custom_rules:
+  swiftui_state_private:
+    name: "SwiftUI State Private"
+    regex: '@State\s+var'
+    match_kinds:
+      - attribute
+    message: "@State properties should be private"
+    severity: warning
+
+  swiftui_body_complexity:
+    name: "SwiftUI Body Complexity"
+    regex: 'var\s+body\s*:\s*some\s+View\s*\{[^}]{300,}\}'
+    message: "View body is too complex. Consider breaking it into smaller views."
+    severity: warning
+
+# Paths to ignore during linting
+excluded:
+  - Pods
+  - build
+  - .build
+  - fastlane
+  - R.generated.swift
+  - Carthage
+  - Generated
+  - DerivedData
+  - Bumpin/Common/CommonImports.swift # Template file
+
+# Reporter type (xcode, json, csv, checkstyle, codeclimate, junit, html, emoji, markdown)
+reporter: "xcode"
