@@ -10,6 +10,7 @@
 		160784942E131C5E00147513 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 160784932E131C5E00147513 /* FirebaseAuth */; };
 		160784962E131C5E00147513 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 160784952E131C5E00147513 /* FirebaseFirestore */; };
 		160784982E131C5E00147513 /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = 160784972E131C5E00147513 /* FirebaseStorage */; };
+		16563C762EA5BEBE008B0E86 /* RtcBasic in Frameworks */ = {isa = PBXBuildFile; productRef = 16563C752EA5BEBE008B0E86 /* RtcBasic */; };
 		16A8A5482E5A153400C20F44 /* FirebaseAnalyticsIdentitySupport in Frameworks */ = {isa = PBXBuildFile; productRef = 16A8A5472E5A153400C20F44 /* FirebaseAnalyticsIdentitySupport */; };
 		16A8A54C2E5A15AD00C20F44 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 16A8A54B2E5A15AD00C20F44 /* FirebaseCore */; };
 		16A8A54E2E5A15AD00C20F44 /* FirebaseCrashlytics in Frameworks */ = {isa = PBXBuildFile; productRef = 16A8A54D2E5A15AD00C20F44 /* FirebaseCrashlytics */; };
@@ -80,6 +81,7 @@
 				16FBA3152E10995800EBBDF4 /* MediaPlayer.framework in Frameworks */,
 				16A8A54C2E5A15AD00C20F44 /* FirebaseCore in Frameworks */,
 				160784982E131C5E00147513 /* FirebaseStorage in Frameworks */,
+				16563C762EA5BEBE008B0E86 /* RtcBasic in Frameworks */,
 				16A8A54E2E5A15AD00C20F44 /* FirebaseCrashlytics in Frameworks */,
 				160784962E131C5E00147513 /* FirebaseFirestore in Frameworks */,
 				160784942E131C5E00147513 /* FirebaseAuth in Frameworks */,
@@ -159,6 +161,7 @@
 				160784972E131C5E00147513 /* FirebaseStorage */,
 				16A8A54B2E5A15AD00C20F44 /* FirebaseCore */,
 				16A8A54D2E5A15AD00C20F44 /* FirebaseCrashlytics */,
+				16563C752EA5BEBE008B0E86 /* RtcBasic */,
 			);
 			productName = Bumpin;
 			productReference = 16FBA2EA2E10995500EBBDF4 /* Bumpin.app */;
@@ -246,6 +249,7 @@
 			packageReferences = (
 				160784852E1316C300147513 /* XCRemoteSwiftPackageReference "swift-algorithms" */,
 				160784862E1317E700147513 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				16563C742EA5BEBE008B0E86 /* XCRemoteSwiftPackageReference "AgoraRtcEngine_iOS" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 16FBA2EB2E10995500EBBDF4 /* Products */;
@@ -659,6 +663,14 @@
 				minimumVersion = 11.15.0;
 			};
 		};
+		16563C742EA5BEBE008B0E86 /* XCRemoteSwiftPackageReference "AgoraRtcEngine_iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/AgoraIO/AgoraRtcEngine_iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.6.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -676,6 +688,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 160784862E1317E700147513 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseStorage;
+		};
+		16563C752EA5BEBE008B0E86 /* RtcBasic */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 16563C742EA5BEBE008B0E86 /* XCRemoteSwiftPackageReference "AgoraRtcEngine_iOS" */;
+			productName = RtcBasic;
 		};
 		16A8A5472E5A153400C20F44 /* FirebaseAnalyticsIdentitySupport */ = {
 			isa = XCSwiftPackageProductDependency;

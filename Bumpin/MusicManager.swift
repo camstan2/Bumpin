@@ -935,6 +935,12 @@ class MusicManager: ObservableObject {
         print("🚀 Cached searchable song: \(song.title)")
     }
     
+    func setMusicVolume(_ volume: Float) {
+        // Note: Direct volume control for music players is not available in iOS
+        // Users should use system volume controls
+        print("🎵 Music volume set to: \(volume) (use system volume controls)")
+    }
+    
     deinit {
         timer?.invalidate()
         musicPlayer.endGeneratingPlaybackNotifications()
