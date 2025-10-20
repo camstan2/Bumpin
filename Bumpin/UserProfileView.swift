@@ -1881,7 +1881,7 @@ struct UserProfileView: View {
                 print("🎯 UserProfileView: Navigating to profile for: \(log.title) (ID: \(log.itemId))")
                 
                 // Set state atomically - no delays, no race conditions
-                selectedPinnedLog = nil // No specific log to highlight
+                selectedPinnedLog = log // Highlight this specific log
                 selectedMusicItem = MusicSearchResult(
                     id: log.itemId,
                     title: log.title,
@@ -1891,7 +1891,7 @@ struct UserProfileView: View {
                     itemType: log.itemType,
                                                         popularity: 0
                                                     )
-                print("🎯 UserProfileView: State set atomically")
+                print("🎯 UserProfileView: State set atomically with pinned log")
                 AnalyticsService.shared.logTap(category: "diary_entry_artwork", id: log.itemId)
             }) {
                 Group {
@@ -4179,6 +4179,9 @@ struct StatDetailListView: View {
     let userReposts: [Repost]
     let profile: UserProfile?
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedMusicItem: MusicSearchResult? = nil
+    @State private var selectedPinnedLog: MusicLog? = nil
+    @State private var selectedList: MusicList? = nil
     
     var body: some View {
         NavigationView {
@@ -4186,6 +4189,9 @@ struct StatDetailListView: View {
                 LazyVStack(spacing: 16) {
                     ForEach(filteredItems, id: \.id) { item in
                         StatDetailCard(item: item, category: category)
+                            .onTapGesture {
+                                handleCardTap(item: item)
+                            }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -4203,6 +4209,48 @@ struct StatDetailListView: View {
                 }
             }
             .background(Color(.systemGroupedBackground))
+        }
+        .fullScreenCover(item: $selectedMusicItem) { musicItem in
+            MusicProfileView(musicItem: musicItem, pinnedLog: selectedPinnedLog)
+        }
+        .fullScreenCover(item: $selectedList) { list in
+            ListDetailView(list: list)
+        }
+    }
+    
+    // Handle card tap based on category
+    private func handleCardTap(item: StatDetailItem) {
+        switch category {
+        case .lists:
+            // For lists, find and show the list detail
+            if let list = userLists.first(where: { $0.id == item.id }) {
+                selectedList = list
+            }
+        default:
+            // For logs, songs, albums, artists, reposts - navigate to music profile with highlighted log
+            if let log = logs.first(where: { $0.id == item.id || $0.itemId == item.id }) {
+                // Found a matching log by ID or itemId
+                selectedPinnedLog = log
+            } else {
+                // For aggregated items (songs, albums, artists), find any log with matching itemId or artistName
+                if let log = logs.first(where: { 
+                    $0.itemId == item.id || $0.artistName == item.title
+                }) {
+                    selectedPinnedLog = log
+                } else {
+                    selectedPinnedLog = nil
+                }
+            }
+            
+            selectedMusicItem = MusicSearchResult(
+                id: item.id,
+                title: item.title,
+                artistName: item.subtitle,
+                albumName: item.itemType == "album" ? item.title : "",
+                artworkURL: item.artworkUrl,
+                itemType: item.itemType,
+                popularity: 0
+            )
         }
     }
     
