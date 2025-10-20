@@ -47,6 +47,7 @@ enum StatCategory: Identifiable {
 
 struct UserProfileView: View {
     let userId: String?
+    @Environment(\.dismiss) private var dismiss
     @State private var profile: UserProfile?
     @State private var logs: [MusicLog] = []
     @State private var isLoading = false
@@ -346,6 +347,17 @@ struct UserProfileView: View {
             VStack(spacing: 0) {
                 // Move buttons up to align with existing blue "More" button
                 HStack {
+                    // Back button in top left (only for non-current users)
+                    if !isCurrentUser {
+                        Button(action: { dismiss() }) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(.primary)
+                                .padding(8)
+                        }
+                        .accessibilityLabel("Back")
+                    }
+                    
                     Spacer()
                     
                     // Settings button in top right

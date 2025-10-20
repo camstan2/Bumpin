@@ -5,16 +5,23 @@ import FirebaseFirestore
 @MainActor
 class TermsAcceptanceManager: ObservableObject {
     @Published var hasAcceptedTerms: Bool = false
-    @Published var isLoading: Bool = false
+    @Published var isLoading: Bool = true // Start as loading
+    @Published var isCheckingTerms: Bool = true // Track if we're still checking
     
     private let db = Firestore.firestore()
     
     init() {
-        checkTermsAcceptance()
+        Task {
+            await checkTermsAcceptance()
+        }
     }
     
     func requiresTermsAcceptance() -> Bool {
         guard let _ = Auth.auth().currentUser else { return false }
+        // Don't show terms screen if we're still checking
+        if isCheckingTerms {
+            return false
+        }
         return !hasAcceptedTerms
     }
     
@@ -32,7 +39,9 @@ class TermsAcceptanceManager: ObservableObject {
             ])
             
             hasAcceptedTerms = true
+            isCheckingTerms = false
             isLoading = false
+            print("✅ Terms acceptance recorded successfully")
             return true
         } catch {
             print("❌ Failed to record terms acceptance: \(error)")
@@ -41,21 +50,32 @@ class TermsAcceptanceManager: ObservableObject {
         }
     }
     
-    private func checkTermsAcceptance() {
+    private func checkTermsAcceptance() async {
         guard let userId = Auth.auth().currentUser?.uid else {
             hasAcceptedTerms = false
+            isCheckingTerms = false
+            isLoading = false
             return
         }
         
-        db.collection("users").document(userId).getDocument { [weak self] snapshot, error in
-            DispatchQueue.main.async {
-                if let data = snapshot?.data(),
-                   let _ = data["termsAcceptedAt"] {
-                    self?.hasAcceptedTerms = true
-                } else {
-                    self?.hasAcceptedTerms = false
-                }
+        do {
+            let snapshot = try await db.collection("users").document(userId).getDocument()
+            
+            if let data = snapshot.data(),
+               let _ = data["termsAcceptedAt"] {
+                hasAcceptedTerms = true
+                print("✅ User has accepted terms")
+            } else {
+                hasAcceptedTerms = false
+                print("⚠️ User has NOT accepted terms")
             }
+        } catch {
+            print("❌ Error checking terms acceptance: \(error)")
+            // On error, assume not accepted to be safe
+            hasAcceptedTerms = false
         }
+        
+        isCheckingTerms = false
+        isLoading = false
     }
 }

@@ -915,7 +915,7 @@ private struct CreatorSpotlightCard: View {
                 MusicProfileView(musicItem: result, pinnedLog: log)
             }
         }
-        .sheet(isPresented: $showProfile) {
+        .fullScreenCover(isPresented: $showProfile) {
             UserProfileView(userId: spotlight.userId)
         }
         .contextMenu {
@@ -1434,7 +1434,7 @@ struct PopularLogRow: View {
             let result = MusicSearchResult(id: log.itemId, title: log.title, artistName: log.artistName, albumName: "", artworkURL: log.artworkUrl, itemType: log.itemType, popularity: 0)
             MusicProfileView(musicItem: result, pinnedLog: log)
         }
-        .sheet(isPresented: $showUserProfile) {
+        .fullScreenCover(isPresented: $showUserProfile) {
             UserProfileView(userId: log.userId)
         }
         .sheet(isPresented: $showingComments) {
@@ -1880,7 +1880,7 @@ struct FollowersLogRow: View {
             let result = MusicSearchResult(id: log.itemId, title: log.title, artistName: log.artistName, albumName: "", artworkURL: log.artworkUrl, itemType: log.itemType, popularity: 0)
             MusicProfileView(musicItem: result, pinnedLog: log)
         }
-        .sheet(isPresented: $showUserProfile) {
+        .fullScreenCover(isPresented: $showUserProfile) {
             UserProfileView(userId: log.userId)
         }
         .onAppear { if userProfile == nil { Task { await fetchUser() } } }

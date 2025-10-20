@@ -369,6 +369,15 @@ struct ConversationView: View, Identifiable {
                             }
                         }
                     }
+                    .gesture(
+                        DragGesture()
+                            .onEnded { value in
+                                if value.translation.height > 50 {
+                                    // Swipe down detected - dismiss keyboard
+                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                                }
+                            }
+                    )
                 }
                 .background(
                     LinearGradient(
@@ -382,7 +391,6 @@ struct ConversationView: View, Identifiable {
                 messageInputBar
             }
             .background(Color(.systemBackground))
-            .ignoresSafeArea(.keyboard, edges: .bottom)
         }
         .onAppear(perform: attach)
         .onDisappear(perform: detach)
@@ -624,18 +632,22 @@ struct ConversationView: View, Identifiable {
             
             HStack(spacing: 12) {
                 // Text Input
-                HStack(spacing: 8) {
-                    TextField("Type a message...", text: $text, axis: .vertical)
-                        .font(.system(size: 16))
-                        .lineLimit(1...6)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 25)
-                                .fill(Color(.systemGray6))
-                        )
-                        .onChange(of: text) { _, _ in handleTyping() }
-                }
+                TextField("Type a message...", text: $text, axis: .vertical)
+                    .font(.system(size: 16))
+                    .lineLimit(1...6)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 25)
+                            .fill(Color(.systemGray6))
+                    )
+                    .onChange(of: text) { _, _ in handleTyping() }
+                    .onSubmit {
+                        if canSend {
+                            send()
+                        }
+                    }
+                    .submitLabel(.send)
                 
                 // Send Button
                 Button(action: send) {
@@ -651,7 +663,10 @@ struct ConversationView: View, Identifiable {
             .padding(.vertical, 12)
             .background(Color(.systemBackground))
         }
-        .padding(.bottom, keyboardHeight > 0 ? 0 : 34) // Account for home indicator
+        .frame(maxWidth: .infinity)
+        .background(Color(.systemBackground))
+        .offset(y: -keyboardHeight)
+        .animation(.easeOut(duration: 0.25), value: keyboardHeight)
     }
     
     private var canSend: Bool {
