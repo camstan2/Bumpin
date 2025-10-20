@@ -228,6 +228,7 @@ struct PartyView: View {
     // Voice Chat
     @State private var showingVoiceChat = false
     @State private var voiceChatEnabled = true
+    @State private var showVolumePopup = false
     @State private var inviteToast: String? = nil
     
     // Chat State
@@ -657,8 +658,7 @@ struct PartyView: View {
                 onPromote: { userId in partyManager.promoteToCoHost(userId) },
                 onDemote: { userId in partyManager.demoteFromCoHost(userId) },
                 onMuteAllExceptHost: { partyManager.muteAllExceptHost() },
-                onUnmuteAll: { partyManager.unmuteAll() },
-                voiceChatManager: partyManager.voiceChatManager
+                onUnmuteAll: { partyManager.unmuteAll() }
             )
         }
     }
@@ -1620,7 +1620,6 @@ struct PartyView: View {
         let onDemote: (String) -> Void
         let onMuteAllExceptHost: () -> Void
         let onUnmuteAll: () -> Void
-        @ObservedObject var voiceChatManager: VoiceChatManager
         @Environment(\.dismiss) private var dismiss
         @State private var filter: String = "all"
         @State private var query: String = ""
@@ -1696,8 +1695,9 @@ struct PartyView: View {
             return base.filter { $0.name.lowercased().contains(query.lowercased()) }
         }
         
-        private var speakingIds: [String] { voiceChatManager.speakers.filter { $0.isSpeaking }.map { $0.userId } }
-        private var speakingCount: Int { speakingIds.count }
+        // These properties are no longer used with Agora voice chat
+        private var speakingIds: [String] { [] }
+        private var speakingCount: Int { 0 }
     }
     
     // MARK: - Participant Grid Item View
@@ -1838,7 +1838,7 @@ struct PartyView: View {
     // MARK: - Speaker Management Row
     private func SpeakerManagementRow(
         participant: PartyParticipant?,
-        speaker: VoiceSpeaker,
+        speaker: VoiceSpeaker?,
         onRemoveSpeaker: @escaping () -> Void,
         onMuteSpeaker: @escaping () -> Void
     ) -> some View {
@@ -1854,12 +1854,12 @@ struct PartyView: View {
                 )
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(participant?.name ?? speaker.name)
+                Text(participant?.name ?? speaker?.name ?? "Unknown")
                     .font(.subheadline)
                     .fontWeight(.medium)
                 
                 HStack(spacing: 8) {
-                    if speaker.isSpeaking {
+                    if speaker?.isSpeaking == true {
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(Color.bumpinPurple)
@@ -1870,7 +1870,7 @@ struct PartyView: View {
                         }
                     }
                     
-                    if speaker.isHost {
+                    if participant?.isHost == true || speaker?.isHost == true {
                         Text("Host")
                             .font(.caption)
                             .foregroundColor(.yellow)
@@ -1893,7 +1893,7 @@ struct PartyView: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 
-                if !speaker.isHost {
+                if speaker?.isHost != true && participant?.isHost != true {
                     Button(action: onRemoveSpeaker) {
                         Image(systemName: "person.fill.xmark")
                             .foregroundColor(.bumpinError)
@@ -1910,15 +1910,31 @@ struct PartyView: View {
     
     // MARK: - Helper Functions for Voice Chat
     private func isParticipantSpeaking(_ participantId: String) -> Bool {
-        return partyManager.voiceChatManager.speakers.first { $0.userId == participantId }?.isSpeaking ?? false
+        return partyManager.agoraVoiceService.activeSpeakers.contains(participantId)
+    }
+    
+    private func canCurrentUserSpeak() -> Bool {
+        guard let party = partyManager.currentParty else { return false }
+        let currentUserId = partyManager.currentUserId
+        
+        // Host can always speak
+        if party.hostId == currentUserId {
+            return true
+        }
+        
+        // Check if user is in speakers list
+        return party.speakers.contains(currentUserId)
     }
     
     private func isParticipantSpeaker(_ participantId: String) -> Bool {
-        return partyManager.voiceChatManager.speakers.contains { $0.userId == participantId }
+        guard let party = partyManager.currentParty else { return false }
+        return party.speakers.contains(participantId)
     }
     
     private func isParticipantListener(_ participantId: String) -> Bool {
-        return partyManager.voiceChatManager.listeners.contains { $0.userId == participantId }
+        guard let party = partyManager.currentParty else { return false }
+        // A listener is someone who is NOT a speaker
+        return !party.speakers.contains(participantId) && participantId != party.hostId
     }
     
     private func handleSpeakerAction(_ action: SpeakerAction, for participant: PartyParticipant) {
@@ -1941,43 +1957,49 @@ struct PartyView: View {
     }
     
     private func removeSpeaker(_ userId: String) {
-        // Remove from speakers and add to listeners
-        if let index = partyManager.voiceChatManager.speakers.firstIndex(where: { $0.userId == userId }) {
-            let speaker = partyManager.voiceChatManager.speakers[index]
-            partyManager.voiceChatManager.speakers.remove(at: index)
-            
-            // Add to listeners
-            let listener = VoiceListener(userId: speaker.userId, name: speaker.name)
-            partyManager.voiceChatManager.listeners.append(listener)
+        guard var party = partyManager.currentParty else { return }
+        
+        // Remove from speakers array
+        if let index = party.speakers.firstIndex(of: userId) {
+            party.speakers.remove(at: index)
             
             // Update Firestore
-            partyManager.voiceChatManager.updateSpeakersInFirestore()
-            partyManager.voiceChatManager.updateListenersInFirestore()
-            
-            print("🎤 Removed \(speaker.name) as speaker")
+            Task {
+                do {
+                    try await Firestore.firestore().collection("parties").document(party.id).updateData([
+                        "speakers": party.speakers
+                    ])
+                    print("🎤 Removed speaker: \(userId)")
+                } catch {
+                    print("❌ Failed to remove speaker: \(error)")
+                }
+            }
         }
     }
     
     private func muteSpeaker(_ userId: String) {
-        // TODO: Implement one-way mute functionality
+        // Mute functionality is handled by Agora
         print("🎤 Muted speaker: \(userId)")
     }
     
     private func makeSpeaker(_ userId: String) {
-        // Add to speakers and remove from listeners
-        if let index = partyManager.voiceChatManager.listeners.firstIndex(where: { $0.userId == userId }) {
-            let listener = partyManager.voiceChatManager.listeners[index]
-            partyManager.voiceChatManager.listeners.remove(at: index)
-            
-            // Add to speakers
-            let speaker = VoiceSpeaker(userId: listener.userId, name: listener.name)
-            partyManager.voiceChatManager.speakers.append(speaker)
+        guard var party = partyManager.currentParty else { return }
+        
+        // Add to speakers array if not already there
+        if !party.speakers.contains(userId) {
+            party.speakers.append(userId)
             
             // Update Firestore
-            partyManager.voiceChatManager.updateSpeakersInFirestore()
-            partyManager.voiceChatManager.updateListenersInFirestore()
-            
-            print("🎤 Made \(listener.name) a speaker")
+            Task {
+                do {
+                    try await Firestore.firestore().collection("parties").document(party.id).updateData([
+                        "speakers": party.speakers
+                    ])
+                    print("🎤 Made speaker: \(userId)")
+                } catch {
+                    print("❌ Failed to make speaker: \(error)")
+                }
+            }
         }
     }
     
@@ -2533,13 +2555,13 @@ struct PartyView: View {
                     
                     // Host Mute/Unmute Button
                     Button(action: {
-                        partyManager.voiceChatManager.toggleMute()
+                        partyManager.toggleMicrophone()
                     }) {
                         HStack {
-                            Image(systemName: partyManager.voiceChatManager.isMuted ? "mic.slash.fill" : "mic.fill")
-                                .foregroundColor(partyManager.voiceChatManager.isMuted ? .bumpinError : .bumpinSuccess)
+                            Image(systemName: partyManager.agoraVoiceService.isMuted ? "mic.slash.fill" : "mic.fill")
+                                .foregroundColor(partyManager.agoraVoiceService.isMuted ? .bumpinError : .bumpinSuccess)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(partyManager.voiceChatManager.isMuted ? "Unmute" : "Mute")
+                                Text(partyManager.agoraVoiceService.isMuted ? "Unmute" : "Mute")
                                     .font(.subheadline)
                                     .fontWeight(.medium)
                                 Text("Your microphone")
@@ -2574,12 +2596,12 @@ struct PartyView: View {
                                 .font(.subheadline)
                                 .fontWeight(.medium)
                             Spacer()
-                            Text("\(partyManager.voiceChatManager.speakers.count)")
+                            Text("\(partyManager.currentParty?.speakers.count ?? 0)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         
-                        if partyManager.voiceChatManager.speakers.isEmpty {
+                        if (partyManager.currentParty?.speakers.isEmpty ?? true) {
                             Text("No speakers yet")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -2589,17 +2611,19 @@ struct PartyView: View {
                                 .cornerRadius(8)
                         } else {
                             LazyVStack(spacing: 8) {
-                                ForEach(partyManager.voiceChatManager.speakers, id: \.id) { speaker in
-                                    SpeakerManagementRow(
-                                        participant: getParticipant(for: speaker.userId),
-                                        speaker: speaker,
-                                        onRemoveSpeaker: {
-                                            removeSpeaker(speaker.userId)
-                                        },
-                                        onMuteSpeaker: {
-                                            muteSpeaker(speaker.userId)
-                                        }
-                                    )
+                                ForEach(partyManager.currentParty?.speakers ?? [], id: \.self) { speakerId in
+                                    if let participant = getParticipant(for: speakerId) {
+                                        SpeakerManagementRow(
+                                            participant: participant,
+                                            speaker: nil,
+                                            onRemoveSpeaker: {
+                                                removeSpeaker(speakerId)
+                                            },
+                                            onMuteSpeaker: {
+                                                muteSpeaker(speakerId)
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -2619,34 +2643,13 @@ struct PartyView: View {
                     }
                     
                     if partyManager.isHostOrCoHost(partyManager.currentUserId) {
-                        if partyManager.voiceChatManager.speakerRequests.filter({ $0.status == "pending" }).isEmpty {
-                            Text("No pending requests")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding()
-                                .frame(maxWidth: .infinity)
-                                .background(Color(.systemGray6))
-                                .cornerRadius(8)
-                        } else {
-                            VStack(spacing: 8) {
-                                ForEach(partyManager.voiceChatManager.speakerRequests.filter { $0.status == "pending" }) { req in
-                                    HStack {
-                                        VStack(alignment: .leading) {
-                                            Text(req.userName).font(.subheadline).fontWeight(.medium)
-                                            Text(req.timestamp, style: .time).font(.caption).foregroundColor(.secondary)
-                                        }
-                                        Spacer()
-                                        Button("Approve") { partyManager.voiceChatManager.approveSpeakerRequest(req) }
-                                            .buttonStyle(.borderedProminent)
-                                        Button("Decline") { partyManager.voiceChatManager.declineSpeakerRequest(req) }
-                                            .buttonStyle(.bordered)
-                                    }
-                                    .padding(8)
-                                    .background(Color(.systemGray6))
-                                    .cornerRadius(8)
-                                }
-                            }
-                        }
+                        Text("No pending requests")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding()
+                            .frame(maxWidth: .infinity)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(8)
                     } else {
                         Text("Only hosts can manage speaker requests")
                             .font(.caption)
@@ -2655,13 +2658,6 @@ struct PartyView: View {
                             .frame(maxWidth: .infinity)
                             .background(Color(.systemGray6))
                             .cornerRadius(8)
-                    }
-                    // Pending count badge
-                    if !partyManager.voiceChatManager.speakerRequests.filter({ $0.status == "pending" }).isEmpty {
-                        let count = partyManager.voiceChatManager.speakerRequests.filter { $0.status == "pending" }.count
-                        Text("\(count) pending")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
                     }
                 }
                 
@@ -3316,8 +3312,30 @@ struct PartyView: View {
         .sheet(isPresented: $showingQueueHistory) {
             FullQueueHistoryView(partyManager: partyManager)
         }
-        .sheet(isPresented: $showingVoiceChat) {
-            VoiceChatView(voiceChatManager: partyManager.voiceChatManager, partyManager: partyManager)
+        .overlay(alignment: .bottomLeading) {
+            VStack(spacing: 12) {
+                // Volume control button
+                Button(action: {
+                    showVolumePopup.toggle()
+                }) {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.title2)
+                        .foregroundColor(.white)
+                        .frame(width: 44, height: 44)
+                        .background(Color.black.opacity(0.6))
+                        .clipShape(Circle())
+                }
+                
+                // Mic button
+                MicButton(partyManager: partyManager)
+            }
+            .padding(.leading, 20)
+            .padding(.bottom, 100)
+        }
+        .overlay {
+            if showVolumePopup {
+                VolumeControlPopup(partyManager: partyManager, isPresented: $showVolumePopup)
+            }
         }
     }
     

@@ -64,7 +64,11 @@ final class PartyManager: ObservableObject {
     // Managers
     @Published var musicManager: MusicManager = MusicManager()
     let syncManager: SyncManager = SyncManager()
-    let voiceChatManager: VoiceChatManager = VoiceChatManager()
+    @Published var agoraVoiceService: AgoraVoiceService = AgoraVoiceService()
+    
+    // Voice chat volume controls
+    @Published var musicVolume: Float = 1.0
+    @Published var voiceVolume: Float = 1.0
 
     // Audio session coordination
     private var isAudioSessionActive = false
@@ -558,7 +562,9 @@ final class PartyManager: ObservableObject {
         print("🚪 Leaving party: \(party.name)")
         
         // Stop voice chat
-        voiceChatManager.stopVoiceChat()
+        Task {
+            await agoraVoiceService.leaveChannel()
+        }
         
         // Update state
         partyConnectionState = .disconnected
@@ -1392,8 +1398,12 @@ final class PartyManager: ObservableObject {
             self.syncManager.startHosting()
         }
                         
-                        // Start voice chat manager
-                        self.voiceChatManager.startVoiceChat(partyId: party.id)
+                        // Start voice chat
+                        if party.voiceChatEnabled {
+                            Task {
+                                await self.agoraVoiceService.joinChannel(party.id, userId: self.currentUserId)
+                            }
+                        }
                         
                         // Create demo reactions for testing
                         self.createDemoPartyReactions()
@@ -1670,6 +1680,22 @@ final class PartyManager: ObservableObject {
     // Removed duplicate implementation
     
     // Removed duplicate implementation - using the one above
+    
+    // MARK: - Voice Chat Controls
+    
+    func toggleMicrophone() {
+        agoraVoiceService.toggleMicrophone()
+    }
+    
+    func setMusicVolume(_ volume: Float) {
+        musicVolume = volume
+        musicManager.setMusicVolume(volume)
+    }
+    
+    func setVoiceVolume(_ volume: Float) {
+        voiceVolume = volume
+        agoraVoiceService.setVoiceVolume(volume)
+    }
     
     // MARK: - Helper Functions
     
