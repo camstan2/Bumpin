@@ -147,7 +147,19 @@ struct BumpinApp: App {
     var body: some Scene {
         WindowGroup {
             if authViewModel.isLoggedIn {
-                if termsManager.requiresTermsAcceptance() {
+                // Show loading screen while checking terms acceptance
+                if termsManager.isCheckingTerms {
+                    VStack {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .padding()
+                        Text("Loading...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(.systemBackground))
+                } else if termsManager.requiresTermsAcceptance() {
                     TermsOfServiceView(isPresented: $showTermsOfService) {
                         Task {
                             await termsManager.acceptTerms()
