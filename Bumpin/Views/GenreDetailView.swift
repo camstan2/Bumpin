@@ -5,6 +5,7 @@ import FirebaseAuth
 struct GenreDetailView: View {
     let genre: String
     let userLogs: [MusicLog]
+    let isPrefiltered: Bool
     @Environment(\.presentationMode) var presentationMode
     @State private var diaryViewFormat: DiaryViewFormat = .list
     @State private var diarySortOption: DiarySortOption = .mostRecent
@@ -18,8 +19,10 @@ struct GenreDetailView: View {
     
     // Filter logs for this specific genre (using same logic as main view)
     private var genreLogs: [MusicLog] {
+        if isPrefiltered {
+            return userLogs
+        }
         return userLogs.filter { log in
-            // Use the same classification logic as the main overview
             let logGenre = classifyGenre(title: log.title, artist: log.artistName)
             let matches = logGenre == genre
             print("🎯 GenreDetailView: \(log.title) classified as \(logGenre), matches \(genre): \(matches)")
@@ -38,19 +41,20 @@ struct GenreDetailView: View {
             case .alphabetical:
                 return log1.title.localizedCaseInsensitiveCompare(log2.title) == .orderedAscending
             case .highestRated:
-                let rating1 = log1.rating ?? 0
-                let rating2 = log2.rating ?? 0
+                let rating1 = log1.rating ?? 0.0
+                let rating2 = log2.rating ?? 0.0
                 if rating1 == rating2 {
                     return log1.dateLogged > log2.dateLogged
                 }
                 return rating1 > rating2
             case .mostPopular:
-                let rating1 = log1.rating ?? 0
-                let rating2 = log2.rating ?? 0
-                if rating1 == rating2 {
-                    return log1.dateLogged > log2.dateLogged
+                // Calculate weighted engagement score: likes×1 + comments×2 + reposts×3
+                let engagement1 = (log1.likeCount ?? 0) + ((log1.commentCount ?? 0) * 2) + ((log1.repostCount ?? 0) * 3)
+                let engagement2 = (log2.likeCount ?? 0) + ((log2.commentCount ?? 0) * 2) + ((log2.repostCount ?? 0) * 3)
+                if engagement1 == engagement2 {
+                    return log1.dateLogged > log2.dateLogged // Tie-breaker: most recent
                 }
-                return rating1 > rating2
+                return engagement1 > engagement2
             }
         }
     }
@@ -83,14 +87,12 @@ struct GenreDetailView: View {
                         Spacer()
                         
                         if !genreLogs.isEmpty {
-                            let avgRating = genreLogs.compactMap { $0.rating }.reduce(0, +) / max(1, genreLogs.compactMap { $0.rating }.count)
-                            HStack(spacing: 2) {
-                                ForEach(1...5, id: \.self) { star in
-                                    Image(systemName: star <= avgRating ? "star.fill" : "star")
-                                        .font(.caption)
-                                        .foregroundColor(star <= avgRating ? .yellow : .gray)
-                                }
-                            }
+                            let avgRating = genreLogs.compactMap { $0.rating }.reduce(0.0, +) / Double(max(1, genreLogs.compactMap { $0.rating }.count))
+                            StarRatingDisplayView(
+                                rating: avgRating,
+                                starSize: 12,
+                                spacing: 1
+                            )
                             Text("Avg Rating")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -556,13 +558,7 @@ private struct GenreDetailLogCard: View {
                     
                     // Rating
                     if let rating = log.rating {
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { s in
-                                Image(systemName: s <= rating ? "star.fill" : "star")
-                                    .foregroundColor(s <= rating ? .yellow : .gray)
-                                    .font(.caption2)
-                            }
-                        }
+                        StarRatingDisplayView(rating: rating, starSize: 10, spacing: 1)
                     }
                 }
                 
@@ -654,13 +650,7 @@ private struct GenreDetailGridCard: View {
                 
                 // Rating stars
                 if let rating = log.rating {
-                    HStack(spacing: 1) {
-                        ForEach(1...5, id: \.self) { star in
-                            Image(systemName: star <= rating ? "star.fill" : "star")
-                                .font(.system(size: 8))
-                                .foregroundColor(star <= rating ? .yellow : .gray)
-                        }
-                    }
+                    StarRatingDisplayView(rating: rating, starSize: 8, spacing: 1, showNumber: false)
                 }
             }
         }

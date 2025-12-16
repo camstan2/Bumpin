@@ -270,6 +270,13 @@ struct NewChatCreationView: View {
     
     private func createChat() {
         guard !selectedUsers.isEmpty else { return }
+        
+        // If exactly one user is selected, reuse their existing DM thread (or create it if missing)
+        if selectedUsers.count == 1, let targetUserId = selectedUsers.first {
+            startOrReuseDirectConversation(with: targetUserId)
+            return
+        }
+        
         guard let currentUserId = Auth.auth().currentUser?.uid else { return }
         
         isCreatingChat = true
@@ -320,6 +327,28 @@ struct NewChatCreationView: View {
                         print("✅ Conversation created successfully: \(conversationId)")
                         NotificationCenter.default.post(name: NSNotification.Name("OpenConversation"), object: convo)
                     }
+                    dismiss()
+                }
+            }
+        }
+    }
+    
+    private func startOrReuseDirectConversation(with userId: String) {
+        isCreatingChat = true
+        errorMessage = nil
+        
+        DirectMessageService.shared.getOrCreateConversation(with: userId) { convo, err in
+            DispatchQueue.main.async {
+                isCreatingChat = false
+                
+                if let err = err {
+                    errorMessage = err.localizedDescription
+                    print("❌ Error starting conversation: \(err.localizedDescription)")
+                    return
+                }
+                
+                if let convo = convo {
+                    NotificationCenter.default.post(name: NSNotification.Name("OpenConversation"), object: convo)
                     dismiss()
                 }
             }

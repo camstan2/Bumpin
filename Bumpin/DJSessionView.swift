@@ -611,6 +611,8 @@ struct DJSessionView: View {
 
 struct ChatMessageRow: View {
     let message: DJChatMessage
+    @State private var showReportSheet = false
+    @State private var showBlockSheet = false
     
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -670,12 +672,30 @@ struct ChatMessageRow: View {
                                 contentType: .chatMessage,
                                 reportedUserId: message.userId,
                                 reportedUsername: message.username,
-                                contentPreview: message.message
+                                contentPreview: message.message,
+                                onReport: { showReportSheet = true },
+                                onBlock: { showBlockSheet = true }
                             )
                         } label: {
                             Image(systemName: "ellipsis")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                        }
+                        .sheet(isPresented: $showReportSheet) {
+                            ReportContentView(
+                                contentId: message.id,
+                                contentType: .chatMessage,
+                                reportedUserId: message.userId,
+                                reportedUsername: message.username,
+                                contentPreview: message.message
+                            )
+                        }
+                        .sheet(isPresented: $showBlockSheet) {
+                            BlockUserView(
+                                userId: message.userId,
+                                username: message.username,
+                                profilePictureUrl: message.userProfilePictureUrl
+                            )
                         }
                     }
                 }

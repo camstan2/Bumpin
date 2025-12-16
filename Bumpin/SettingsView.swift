@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var showTuner: Bool = false
     @State private var selectedTab: SettingsTab = .user
     @EnvironmentObject var adminState: AdminState
+    @Environment(\.dismiss) private var dismiss
     
     enum SettingsTab: String, CaseIterable, Identifiable {
         case user = "User Settings"
@@ -25,7 +26,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                // Tab Picker (only show for admins)
+                // Admin Tab Picker (completely hidden for non-admins)
                 if adminState.isAdmin {
                     Picker("Settings Tab", selection: $selectedTab) {
                         ForEach(SettingsTab.allCases) { tab in
@@ -36,25 +37,30 @@ struct SettingsView: View {
                     .pickerStyle(SegmentedPickerStyle())
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
-                }
                 
-                // Tab Content
+                    // Tab Content for Admins
                 Group {
-                    if adminState.isAdmin {
-                        // Admin users see both tabs
                         switch selectedTab {
                         case .user:
                             userSettingsContent
                         case .admin:
                             adminSettingsContent
                         }
+                        }
                     } else {
-                        // Regular users only see user settings
+                    // Non-admin users only see user settings
                         userSettingsContent
-                    }
                 }
             }
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
             .onAppear { 
                 Task { 
                     await loadHidden()
@@ -65,18 +71,224 @@ struct SettingsView: View {
         }
     }
     
-    // MARK: - User Settings Content
+    // MARK: - User Settings Content (NEW STRUCTURE)
+    
     private var userSettingsContent: some View {
         List {
-            musicPlatformSection
-            matchmakingSection
-            migrationSection
-            hiddenUsersSection
+            accountSection
+            appearanceSection
+            musicSection
+            socialPrivacySection
+            notificationsSection
+            aboutLegalSection
             signOutSection
         }
     }
     
-    // MARK: - Admin Settings Content
+    // MARK: - Account & Security Section
+    
+    private var accountSection: some View {
+        Section(header: Text("Account")) {
+            NavigationLink(destination: AccountSecuritySettingsView()) {
+                SettingsRow(
+                    icon: "person.circle.fill",
+                    iconColor: .blue,
+                    title: "Account & Security",
+                    subtitle: "Email, password, delete account"
+                )
+            }
+        }
+    }
+    
+    // MARK: - Appearance Section
+    
+    private var appearanceSection: some View {
+        Section(header: Text("Appearance")) {
+            NavigationLink(destination: AppearanceSettingsView()) {
+                SettingsRow(
+                    icon: "paintbrush.fill",
+                    iconColor: .purple,
+                    title: "Appearance",
+                    subtitle: AppearanceManager.shared.appearancePreference.displayName
+                )
+            }
+        }
+    }
+    
+    // MARK: - Music Section
+    
+    private var musicSection: some View {
+        Section(header: Text("Music")) {
+            NavigationLink(destination: MusicPlatformSettingsView()) {
+                SettingsRow(
+                    icon: "music.note",
+                    iconColor: .purple,
+                    title: "Music Service",
+                    subtitle: UnifiedMusicSearchService.shared.platformPreference.displayName
+                )
+            }
+            
+            // Now Playing Toggle (inline)
+            nowPlayingToggleRow
+        }
+    }
+    
+    private var nowPlayingToggleRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: Binding(
+                get: { NowPlayingSyncService.shared.isEnabled },
+                set: { newValue in
+                    if newValue {
+                        NowPlayingSyncService.shared.enableSync()
+                    } else {
+                        NowPlayingSyncService.shared.disableSync()
+                    }
+                }
+            )) {
+                HStack {
+                    Image(systemName: "waveform.circle.fill")
+                        .foregroundColor(.green)
+                        .frame(width: 24)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Share Now Playing")
+                            .font(.subheadline)
+                        if NowPlayingSyncService.shared.isEnabled {
+                            if let title = NowPlayingSyncService.shared.currentTrackTitle,
+                               let artist = NowPlayingSyncService.shared.currentTrackArtist {
+                                Text("\(title) – \(artist)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            } else {
+                                Text("No music playing")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                        }
+                    }
+                }
+            }
+            .tint(.green)
+            
+            if NowPlayingSyncService.shared.isEnabled {
+                if let lastSync = NowPlayingSyncService.shared.lastSyncDate {
+                    HStack {
+                        Image(systemName: "clock")
+                            .foregroundColor(.secondary)
+                            .font(.caption2)
+                        
+                        Text("Last synced: \(lastSync, style: .relative) ago")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                        if NowPlayingSyncService.shared.isSyncing {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Social & Privacy Section
+    
+    private var socialPrivacySection: some View {
+        Section(header: Text("Social & Privacy")) {
+            NavigationLink(destination: MatchmakingSettingsView()) {
+                SettingsRow(
+                    icon: "heart.text.square",
+                    iconColor: .pink,
+                    title: "Matchmaking",
+                    subtitle: "Music taste matching preferences"
+                )
+            }
+            
+            NavigationLink(destination: PrivacySettingsView()) {
+                SettingsRow(
+                    icon: "lock.fill",
+                    iconColor: .blue,
+                    title: "Privacy",
+                    subtitle: "Profile visibility and activity"
+                )
+            }
+            
+            NavigationLink(destination: BlockedUsersView()) {
+                SettingsRow(
+                    icon: "person.slash.fill",
+                    iconColor: .red,
+                    title: "Blocked Users",
+                    subtitle: BlockedUsersService.shared.blockedUsers.isEmpty ? "None" : "\(BlockedUsersService.shared.blockedUsers.count) blocked"
+                )
+            }
+            
+            NavigationLink(destination: HiddenUsersView()) {
+                SettingsRow(
+                    icon: "eye.slash.fill",
+                    iconColor: .orange,
+                    title: "Hidden Users",
+                    subtitle: hiddenUsers.isEmpty ? "None" : "\(hiddenUsers.count) hidden"
+                )
+            }
+        }
+    }
+    
+    // MARK: - Notifications Section
+    
+    private var notificationsSection: some View {
+        Section(header: Text("Notifications")) {
+            NavigationLink(destination: NotificationSettingsView()) {
+                SettingsRow(
+                    icon: "bell.fill",
+                    iconColor: NotificationPreferencesService.shared.pushNotificationsEnabled ? .green : .red,
+                    title: "Notifications",
+                    subtitle: NotificationPreferencesService.shared.pushNotificationsEnabled ? "Enabled" : "Disabled"
+                )
+            }
+        }
+    }
+    
+    // MARK: - About & Legal Section
+    
+    private var aboutLegalSection: some View {
+        Section(header: Text("About & Legal")) {
+            NavigationLink(destination: TermsAndConditionsView()) {
+                SettingsRow(
+                    icon: "doc.text.fill",
+                    iconColor: .purple,
+                    title: "Terms and Conditions",
+                    subtitle: "Read our terms of service"
+                )
+            }
+        }
+    }
+    
+    // MARK: - Sign Out Section
+    
+    private var signOutSection: some View {
+        Section {
+            Button(action: { AuthViewModel().logout() }) {
+                HStack {
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                        .foregroundColor(.red)
+                        .frame(width: 24)
+                    
+                    Text("Sign Out")
+                            .font(.subheadline)
+                        .foregroundColor(.red)
+                    
+                    Spacer()
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+    
+    // MARK: - Admin Settings Content (UNCHANGED - kept separate)
+    
     private var adminSettingsContent: some View {
         List {
             #if DEBUG
@@ -85,6 +297,7 @@ struct SettingsView: View {
             adminSection
             scoringSection
             adminDemoSection
+            reportsSection
         }
     }
     
@@ -110,9 +323,9 @@ struct SettingsView: View {
                     Image(systemName: "chevron.right")
                         .foregroundColor(.secondary)
                         .font(.caption)
-                }
-            }
-            
+        }
+    }
+    
             NavigationLink(destination: MatchmakingBotMockView()) {
                 HStack {
                     Image(systemName: "eye")
@@ -136,6 +349,30 @@ struct SettingsView: View {
             }
         }
     }
+
+    // MARK: - Admin Reports Section
+    private var reportsSection: some View {
+        Section(header: Text("Reports")) {
+            NavigationLink(destination: AdminReportsView()) {
+                HStack {
+                    Image(systemName: "flag.fill")
+                        .foregroundColor(.red)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reports")
+                            .font(.subheadline)
+                        Text("Review content and user reports")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                }
+            }
+        }
+    }
     
     #if DEBUG
     private var debugSection: some View {
@@ -148,7 +385,7 @@ struct SettingsView: View {
                     
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Cross-Platform Testing")
-                            .font(.subheadline)
+                        .font(.subheadline)
                         Text("Reset states and test flows")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -164,109 +401,6 @@ struct SettingsView: View {
         }
     }
     #endif
-    
-    private var musicPlatformSection: some View {
-        Section(header: Text("Music Platform")) {
-            NavigationLink(destination: MusicPlatformSettingsView()) {
-                HStack {
-                    Image(systemName: "music.note")
-                        .foregroundColor(.purple)
-                        .frame(width: 20)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Music Service")
-                            .font(.subheadline)
-                        Text(UnifiedMusicSearchService.shared.platformPreference.displayName)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    Image(systemName: "chevron.right")
-                        .foregroundColor(.secondary)
-                        .font(.caption)
-                }
-            }
-        }
-    }
-    
-    private var matchmakingSection: some View {
-        Section(header: Text("Music Matchmaking")) {
-            NavigationLink(destination: MatchmakingSettingsView()) {
-                HStack {
-                    Image(systemName: "heart.text.square")
-                        .foregroundColor(.purple)
-                        .frame(width: 20)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Music Matchmaking")
-                            .font(.subheadline)
-                        Text("Get matched with people who share your taste")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    Image(systemName: "chevron.right")
-                        .foregroundColor(.secondary)
-                        .font(.caption)
-                }
-            }
-        }
-    }
-    
-    private var migrationSection: some View {
-        Section(header: Text("Cross-Platform Migration")) {
-            NavigationLink(destination: MigrationSettingsView()) {
-                HStack {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundColor(.blue)
-                        .frame(width: 20)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Universal Tracks")
-                            .font(.subheadline)
-                        Text("Migrate to cross-platform system")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    Image(systemName: "chevron.right")
-                        .foregroundColor(.secondary)
-                        .font(.caption)
-                }
-            }
-        }
-    }
-    
-    private var hiddenUsersSection: some View {
-        HiddenUsersSection(hiddenUsers: hiddenUsers) { uid in
-            Task { await unhideUserDirect(uid); await loadHidden() }
-        }
-    }
-    
-    private var signOutSection: some View {
-        Section {
-            Button(action: { AuthViewModel().logout() }) {
-                HStack {
-                    Image(systemName: "rectangle.portrait.and.arrow.right")
-                        .foregroundColor(.red)
-                        .frame(width: 20)
-                    
-                    Text("Sign Out")
-                        .font(.subheadline)
-                        .foregroundColor(.red)
-                    
-                    Spacer()
-                }
-            }
-            .buttonStyle(PlainButtonStyle())
-        }
-    }
     
     private var scoringSection: some View {
         Section(header: Text("Admin Tools")) {
@@ -331,19 +465,15 @@ struct SettingsView: View {
         }
     }
     
+    // MARK: - Helper Functions
+    
     private func loadHidden() async {
         guard let uid = Auth.auth().currentUser?.uid else { hiddenUsers = []; return }
         do {
             let snap = try await Firestore.firestore().collection("users").document(uid).getDocument()
-            let arr = (snap.data()? ["hiddenUsers"] as? [String]) ?? []
+            let arr = (snap.data()?["hiddenUsers"] as? [String]) ?? []
             await MainActor.run { self.hiddenUsers = arr }
         } catch { await MainActor.run { self.hiddenUsers = [] } }
-    }
-
-    private func unhideUserDirect(_ userId: String) async {
-        guard let uid = Auth.auth().currentUser?.uid else { return }
-        do { try await Firestore.firestore().collection("users").document(uid).updateData(["hiddenUsers": FieldValue.arrayRemove([userId])]) }
-        catch { }
     }
     
     // MARK: - Admin Setup
@@ -369,326 +499,30 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Cross-Platform Debug View (Development Only)
+// MARK: - Settings Row Component
 
-#if DEBUG
-struct CrossPlatformDebugView: View {
-    @State private var showingAlert = false
-    @State private var alertMessage = ""
-    
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                // Header
-                VStack(spacing: 12) {
-                    Image(systemName: "wrench.and.screwdriver")
-                        .font(.system(size: 40))
-                        .foregroundColor(.orange)
-                    
-                    Text("Cross-Platform Debug Tools")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    
-                    Text("Tools for testing the cross-platform music system during development.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 20)
-                
-                // Debug actions
-                VStack(spacing: 12) {
-                    Button(action: {
-                        resetOnboardingState()
-                        alertMessage = "Onboarding state reset. Restart app to test new user flow."
-                        showingAlert = true
-                    }) {
-                        DebugActionCard(
-                            icon: "person.badge.plus",
-                            title: "Reset Onboarding State",
-                            description: "Test new user platform selection flow"
-                        )
-                    }
-                    
-                    Button(action: {
-                        resetMigrationPromptState()
-                        alertMessage = "Migration prompt state reset. Restart app to test existing user flow."
-                        showingAlert = true
-                    }) {
-                        DebugActionCard(
-                            icon: "arrow.triangle.2.circlepath",
-                            title: "Reset Migration Prompt State",
-                            description: "Test existing user upgrade prompts"
-                        )
-                    }
-                    
-                    Button(action: {
-                        showCurrentState()
-                        alertMessage = "Check console for current testing state."
-                        showingAlert = true
-                    }) {
-                        DebugActionCard(
-                            icon: "info.circle",
-                            title: "Show Current State",
-                            description: "Display current UserDefaults values in console"
-                        )
-                    }
-                    
-                    Button(action: {
-                        testCrossPlatformMatching()
-                        alertMessage = "Running manual cross-platform test. Check console for results."
-                        showingAlert = true
-                    }) {
-                        DebugActionCard(
-                            icon: "link",
-                            title: "Test Cross-Platform Matching",
-                            description: "Run manual test of universal track system",
-                            isPrimary: true
-                        )
-                    }
-                }
-                .padding(.horizontal, 20)
-            }
-            .padding(.bottom, 40)
-        }
-        .navigationTitle("Debug Tools")
-        .navigationBarTitleDisplayMode(.inline)
-        .alert("Debug Action", isPresented: $showingAlert) {
-            Button("OK") { }
-        } message: {
-            Text(alertMessage)
-        }
-    }
-    
-    // MARK: - Debug Functions
-    
-    private func resetOnboardingState() {
-        UserDefaults.standard.removeObject(forKey: "music_platform_onboarding_completed")
-        UserDefaults.standard.removeObject(forKey: "music_platform_preference")
-        print("🔄 Reset onboarding state - app will show onboarding on next launch")
-    }
-    
-    private func resetMigrationPromptState() {
-        UserDefaults.standard.removeObject(forKey: "cross_platform_prompt_dismissed")
-        UserDefaults.standard.removeObject(forKey: "last_cross_platform_prompt")
-        UserDefaults.standard.set("apple_music_only", forKey: "music_platform_preference")
-        UserDefaults.standard.set(true, forKey: "music_platform_onboarding_completed")
-        print("🔄 Reset migration prompt state - app will show migration prompt on next launch")
-    }
-    
-    private func showCurrentState() {
-        let onboardingCompleted = UserDefaults.standard.bool(forKey: "music_platform_onboarding_completed")
-        let promptDismissed = UserDefaults.standard.bool(forKey: "cross_platform_prompt_dismissed")
-        let preference = UserDefaults.standard.string(forKey: "music_platform_preference") ?? "none"
-        
-        print("📊 Current Testing State:")
-        print("   Onboarding Completed: \(onboardingCompleted)")
-        print("   Migration Prompt Dismissed: \(promptDismissed)")
-        print("   Platform Preference: \(preference)")
-    }
-    
-    private func testCrossPlatformMatching() {
-        Task {
-            print("🧪 Manual Cross-Platform Test Starting...")
-            
-            // Test universal track creation
-            let appleTrackId = "1421241217" // Example Apple Music ID
-            let universalTrack = await TrackMatchingService.shared.getUniversalTrack(
-                title: "Test Song",
-                artist: "Test Artist",
-                albumName: "Test Album",
-                appleMusicId: appleTrackId
-            )
-            
-            print("✅ Created universal track: \(universalTrack.id)")
-            
-            // Test Spotify search
-            let spotifyResults = await SpotifyService.shared.searchTracks(query: "Test Song Test Artist", limit: 1)
-            print("🎵 Spotify search returned \(spotifyResults.count) results")
-            
-            print("✅ Manual test completed!")
-        }
-    }
-}
-
-struct DebugActionCard: View {
+struct SettingsRow: View {
     let icon: String
+    let iconColor: Color
     let title: String
-    let description: String
-    var isPrimary: Bool = false
+    let subtitle: String
     
-    var body: some View {
-        HStack(spacing: 16) {
-            Image(systemName: icon)
-                .foregroundColor(isPrimary ? .white : .orange)
-                .font(.title2)
-                .frame(width: 30)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                    .fontWeight(.semibold)
-                    .foregroundColor(isPrimary ? .white : .primary)
-                
-                Text(description)
-                    .font(.subheadline)
-                    .foregroundColor(isPrimary ? .white.opacity(0.8) : .secondary)
-            }
-            
-            Spacer()
-            
-            Image(systemName: "chevron.right")
-                .foregroundColor(isPrimary ? .white.opacity(0.7) : .secondary)
-                .font(.caption)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isPrimary ? 
-                        AnyShapeStyle(LinearGradient(colors: [.orange, .orange.opacity(0.8)], startPoint: .leading, endPoint: .trailing)) :
-                        AnyShapeStyle(Color(.systemGray6))
-                    )
-            )
-    }
-}
-#endif
-
-// MARK: - Hidden Users Section
-private struct HiddenUsersSection: View {
-    let hiddenUsers: [String]
-    let onUnhide: (String) -> Void
-    var body: some View {
-        Section(header: Text("Hidden Users")) {
-            if hiddenUsers.isEmpty {
-                Text("No hidden users").foregroundColor(.secondary)
-            } else {
-                ForEach(hiddenUsers, id: \.self) { uid in
-                    HStack {
-                        Text(uid).font(.footnote)
-                        Spacer()
-                        Button("Unhide") { onUnhide(uid) }
-                            .foregroundColor(.purple)
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct LegacyScoringTunerView: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var remoteValues: [String: Double] = [:]
-    @State private var textInputs: [String: String] = [:]
-    @State private var isLoading = false
-    @State private var error: String? = nil
-    
-    // Keys we expose for quick tuning
-    private let keys: [String] = [
-        "scoring.searchPrefixBonus",
-        "scoring.searchWordStartBonus",
-        "scoring.searchSubstringBonus",
-        "scoring.searchFuzzyBonus",
-        "scoring.appleProviderRankWeight",
-        "scoring.searchTextWeight",
-        "scoring.searchPopularityWeight"
-    ]
-    
-    var body: some View {
-        NavigationView {
-            List {
-                if let error = error { Text(error).foregroundColor(.red) }
-                if isLoading { ProgressView() }
-                Section(header: Text("Remote Values")) {
-                    ForEach(keys, id: \.self) { key in
-                        ScoringKeyRow(
-                            key: key,
-                            current: remoteValues[key],
-                            text: Binding(
-                                get: { textInputs[key] ?? "" },
-                                set: { textInputs[key] = $0 }
-                            )
-                        )
-                    }
-                    Button("Save to Remote") { Task { await save() } }
-                        .foregroundColor(.purple)
-                }
-            }
-            .navigationTitle("Scoring Tuner")
-            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
-            .onAppear { Task { await load() } }
-        }
-    }
-    
-    private func load() async {
-        guard isAdmin() else { error = "Admin only"; return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let snap = try await Firestore.firestore().collection("config").document("scoring").getDocument()
-            let data = snap.data() ?? [:]
-            var map: [String: Double] = [:]
-            for (k, v) in data { if let n = v as? NSNumber { map[k] = n.doubleValue } else if let d = v as? Double { map[k] = d } }
-            await MainActor.run {
-                self.remoteValues = map
-                for k in keys { self.textInputs[k] = map[k].map { String($0) } ?? "" }
-            }
-        } catch {
-            await MainActor.run { self.error = error.localizedDescription }
-        }
-    }
-    
-    private func save() async {
-        guard isAdmin() else { error = "Admin only"; return }
-        var updates: [String: Any] = [:]
-        for k in keys {
-            if let t = textInputs[k], let dbl = Double(t) { updates[k] = dbl }
-        }
-        do {
-            try await Firestore.firestore().collection("config").document("scoring").setData(updates, merge: true)
-            // Re-apply locally
-            var map: [String: Double] = [:]
-            for (k, v) in updates { if let d = v as? Double { map[k] = d } }
-            // Apply if available at runtime
-            _ = map
-            await load()
-        } catch {
-            await MainActor.run { self.error = error.localizedDescription }
-        }
-    }
-    
-    private func isAdmin() -> Bool {
-        guard let uid = Auth.auth().currentUser?.uid else { return false }
-        // Simple check: allow if userId ends with a known suffix or belongs to a small allowlist
-        let allowlist: Set<String> = ["admin1", "admin2"]
-        return allowlist.contains(uid)
-    }
-}
-
-// MARK: - Row for a single scoring key
-private struct ScoringKeyRow: View {
-    let key: String
-    let current: Double?
-    let text: Binding<String>
-
     var body: some View {
         HStack {
+            Image(systemName: icon)
+                .foregroundColor(iconColor)
+                .frame(width: 24)
+            
             VStack(alignment: .leading, spacing: 2) {
-                Text(key).font(.caption)
-                Text("Current: \(format(current))")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                Text(title)
+                        .font(.subheadline)
+                Text(subtitle)
+                    .font(.caption)
+                        .foregroundColor(.secondary)
             }
+            
             Spacer()
-            TextField("value", text: text)
-                .keyboardType(.decimalPad)
-                .frame(width: 90)
         }
-    }
-
-    private func format(_ value: Double?) -> String {
-        guard let v = value else { return "-" }
-        return String(format: "%.2f", v)
     }
 }
 
@@ -708,8 +542,52 @@ extension SettingsView {
                             
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Matchmaking Admin")
-                                    .font(.subheadline)
+                    .font(.subheadline)
                                 Text("Monitor and manage music matchmaking")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                .font(.caption)
+        }
+                    }
+                    
+                    NavigationLink(destination: SimplifiedAdminPromptsView()) {
+                    HStack {
+                            Image(systemName: "quote.bubble.fill")
+                            .foregroundColor(.purple)
+                                .frame(width: 20)
+                            
+            VStack(alignment: .leading, spacing: 2) {
+                                Text("Daily Prompts Admin")
+                                    .font(.subheadline)
+                                Text("Manage and schedule daily music prompts")
+                                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+                            
+            Spacer()
+                            
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
+                    
+                    NavigationLink(destination: UniversalTrackMigrationView()) {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundColor(.green)
+                                .frame(width: 20)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cross-Platform Migration")
+                                    .font(.subheadline)
+                                Text("Migrate logs for universal track system")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -722,16 +600,38 @@ extension SettingsView {
                         }
                     }
                     
-                    NavigationLink(destination: AdminDailyPromptsView()) {
+                    NavigationLink(destination: FixTermsAcceptanceView()) {
                         HStack {
-                            Image(systemName: "quote.bubble.fill")
-                                .foregroundColor(.purple)
+                            Image(systemName: "doc.text.fill")
+                                .foregroundColor(.orange)
                                 .frame(width: 20)
                             
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Daily Prompts Admin")
+                                Text("Fix Terms Acceptance")
                                     .font(.subheadline)
-                                Text("Manage and schedule daily music prompts")
+                                Text("Add terms acceptance to existing users")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
+                    
+                    NavigationLink(destination: CrossPlatformTestingView()) {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.blue)
+                                .frame(width: 20)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Cross-Platform Tests")
+                                    .font(.subheadline)
+                                Text("Validate Apple Music & Spotify integration")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -1019,4 +919,187 @@ extension SettingsView {
     }
 }
 
+// MARK: - Cross-Platform Debug View (Development Only)
 
+#if DEBUG
+struct CrossPlatformDebugView: View {
+    @State private var showingAlert = false
+    @State private var alertMessage = ""
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // Header
+                VStack(spacing: 12) {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .font(.system(size: 40))
+                        .foregroundColor(.orange)
+                    
+                    Text("Cross-Platform Debug Tools")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    
+                    Text("Tools for testing the cross-platform music system during development.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 20)
+                
+                // Debug actions
+                VStack(spacing: 12) {
+                    Button(action: {
+                        resetOnboardingState()
+                        alertMessage = "Onboarding state reset. Restart app to test new user flow."
+                        showingAlert = true
+                    }) {
+                        DebugActionCard(
+                            icon: "person.badge.plus",
+                            title: "Reset Onboarding State",
+                            description: "Test new user platform selection flow"
+                        )
+                    }
+                    
+                    Button(action: {
+                        resetMigrationPromptState()
+                        alertMessage = "Migration prompt state reset. Restart app to test existing user flow."
+                        showingAlert = true
+                    }) {
+                        DebugActionCard(
+                            icon: "arrow.triangle.2.circlepath",
+                            title: "Reset Migration Prompt State",
+                            description: "Test existing user upgrade prompts"
+                        )
+                    }
+                    
+                    Button(action: {
+                        showCurrentState()
+                        alertMessage = "Check console for current testing state."
+                        showingAlert = true
+                    }) {
+                        DebugActionCard(
+                            icon: "info.circle",
+                            title: "Show Current State",
+                            description: "Display current UserDefaults values in console"
+                        )
+                    }
+                    
+                    Button(action: {
+                        testCrossPlatformMatching()
+                        alertMessage = "Running manual cross-platform test. Check console for results."
+                        showingAlert = true
+                    }) {
+                        DebugActionCard(
+                            icon: "link",
+                            title: "Test Cross-Platform Matching",
+                            description: "Run manual test of universal track system",
+                            isPrimary: true
+                        )
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+            .padding(.bottom, 40)
+        }
+        .navigationTitle("Debug Tools")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Debug Action", isPresented: $showingAlert) {
+            Button("OK") { }
+        } message: {
+            Text(alertMessage)
+        }
+    }
+    
+    // MARK: - Debug Functions
+    
+    private func resetOnboardingState() {
+        UserDefaults.standard.removeObject(forKey: "music_platform_onboarding_completed")
+        UserDefaults.standard.removeObject(forKey: "music_platform_preference")
+        print("🔄 Reset onboarding state - app will show onboarding on next launch")
+    }
+    
+    private func resetMigrationPromptState() {
+        UserDefaults.standard.removeObject(forKey: "cross_platform_prompt_dismissed")
+        UserDefaults.standard.removeObject(forKey: "last_cross_platform_prompt")
+        UserDefaults.standard.set("apple_music_only", forKey: "music_platform_preference")
+        UserDefaults.standard.set(true, forKey: "music_platform_onboarding_completed")
+        print("🔄 Reset migration prompt state - app will show migration prompt on next launch")
+    }
+    
+    private func showCurrentState() {
+        let onboardingCompleted = UserDefaults.standard.bool(forKey: "music_platform_onboarding_completed")
+        let promptDismissed = UserDefaults.standard.bool(forKey: "cross_platform_prompt_dismissed")
+        let preference = UserDefaults.standard.string(forKey: "music_platform_preference") ?? "none"
+        
+        print("📊 Current Testing State:")
+        print("   Onboarding Completed: \(onboardingCompleted)")
+        print("   Migration Prompt Dismissed: \(promptDismissed)")
+        print("   Platform Preference: \(preference)")
+    }
+    
+    private func testCrossPlatformMatching() {
+        Task {
+            print("🧪 Manual Cross-Platform Test Starting...")
+            
+            // Test universal track creation
+            let appleTrackId = "1421241217" // Example Apple Music ID
+            let universalTrack = await TrackMatchingService.shared.getUniversalTrack(
+                title: "Test Song",
+                artist: "Test Artist",
+                albumName: "Test Album",
+                appleMusicId: appleTrackId
+            )
+            
+            print("✅ Created universal track: \(universalTrack.id)")
+            
+            // Test Spotify search
+            let spotifyResults = await SpotifyService.shared.searchTracks(query: "Test Song Test Artist", limit: 1)
+            print("🎵 Spotify search returned \(spotifyResults.count) results")
+            
+            print("✅ Manual test completed!")
+        }
+    }
+}
+
+struct DebugActionCard: View {
+    let icon: String
+    let title: String
+    let description: String
+    var isPrimary: Bool = false
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .foregroundColor(isPrimary ? .white : .orange)
+                .font(.title2)
+                .frame(width: 30)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(isPrimary ? .white : .primary)
+                
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundColor(isPrimary ? .white.opacity(0.8) : .secondary)
+            }
+            
+            Spacer()
+            
+            Image(systemName: "chevron.right")
+                .foregroundColor(isPrimary ? .white.opacity(0.7) : .secondary)
+                .font(.caption)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isPrimary ? 
+                        AnyShapeStyle(LinearGradient(colors: [.orange, .orange.opacity(0.8)], startPoint: .leading, endPoint: .trailing)) :
+                        AnyShapeStyle(Color(.systemGray6))
+                    )
+            )
+    }
+}
+#endif

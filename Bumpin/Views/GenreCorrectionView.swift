@@ -247,7 +247,8 @@ struct GenreCorrectionView: View {
         let updateData: [String: Any] = [
             "userCorrectedGenre": selectedGenre,
             "classificationMethod": "user_corrected",
-            "genreConfidenceScore": 1.0 // User corrections have 100% confidence
+            "genreConfidenceScore": 1.0, // User corrections have 100% confidence
+            "genres": [selectedGenre] // Update genres array for Firestore querying
         ]
         
         db.collection("logs").document(log.id).updateData(updateData) { error in

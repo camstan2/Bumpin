@@ -501,7 +501,7 @@ struct DiscussionView: View {
             set: { selectedUserIdForProfile = $0?.value }
         )) { userIdWrapper in
             NavigationView {
-                UserProfileView(userId: userIdWrapper.value)
+                UserProfileView(userId: userIdWrapper.value, showFullProfile: false)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .navigationBarLeading) {

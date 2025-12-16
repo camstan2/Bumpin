@@ -8,18 +8,29 @@ class RandomChatMatchingService {
     private let db = Firestore.firestore()
     private var matchingTimer: Timer?
     private let matchingInterval: TimeInterval = 5 // Check for matches every 5 seconds
+    private var authHandle: AuthStateDidChangeListenerHandle?
     
     private init() {
-        startMatchingProcess()
+        authHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
+            if user != nil {
+                self?.startMatchingProcess()
+            } else {
+                self?.stopMatchingProcess()
+            }
+        }
     }
     
     deinit {
+        if let authHandle {
+            Auth.auth().removeStateDidChangeListener(authHandle)
+        }
         stopMatchingProcess()
     }
     
     // MARK: - Matching Process
     
     private func startMatchingProcess() {
+        guard matchingTimer == nil else { return }
         matchingTimer = Timer.scheduledTimer(withTimeInterval: matchingInterval, repeats: true) { [weak self] _ in
             Task {
                 await self?.processQueue()
@@ -33,6 +44,7 @@ class RandomChatMatchingService {
     }
     
     private func processQueue() async {
+        guard Auth.auth().currentUser != nil else { return }
         do {
             // Get all waiting requests, ordered by timestamp
             let snapshot = try await db.collection("randomChatQueue")
@@ -44,11 +56,10 @@ class RandomChatMatchingService {
                 try? Firestore.Decoder().decode(QueueRequest.self, from: doc.data())
             }
             
-            print("🔍 RandomChatMatchingService: Found \(requests.count) waiting requests")
+            // Reduced logging - only log when matches are found
             
             // For testing: if there's only 1 person, create a mock second person
             if requests.count == 1 {
-                print("🤖 RandomChatMatchingService: Creating mock second user for testing")
                 let mockRequest = QueueRequest(
                     userId: "mock_user_\(UUID().uuidString.prefix(8))",
                     userName: "Test User",
@@ -86,10 +97,9 @@ class RandomChatMatchingService {
     private func processSoloRequests(_ requests: inout [QueueRequest]) async {
         // Filter solo requests
         let soloRequests = requests.filter { $0.groupSize == 1 }
-        print("👤 RandomChatMatchingService: Processing \(soloRequests.count) solo requests")
         
         guard soloRequests.count >= 2 else { 
-            print("⏳ RandomChatMatchingService: Not enough solo requests for matching (need 2, have \(soloRequests.count))")
+            // Reduced logging - only log when there are actual matches to make
             return 
         }
         

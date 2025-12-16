@@ -558,6 +558,7 @@ struct QuickActionCard: View {
 struct AdminPromptRow: View {
     let prompt: DailyPrompt
     let adminService: PromptAdminService
+    @State private var isActivating = false
     
     var body: some View {
         HStack(spacing: 12) {
@@ -604,6 +605,30 @@ struct AdminPromptRow: View {
                     .padding(.vertical, 4)
                     .background(Color.gray.opacity(0.1))
                     .clipShape(Capsule())
+            } else {
+                // Scheduled prompt - show activate button
+                Button(action: {
+                    activatePrompt()
+                }) {
+                    HStack(spacing: 4) {
+                        if isActivating {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Image(systemName: "bolt.fill")
+                                .font(.caption)
+                        }
+                        Text("Activate")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.purple)
+                    .clipShape(Capsule())
+                }
+                .disabled(isActivating)
             }
         }
         .padding(.horizontal, 12)
@@ -612,6 +637,21 @@ struct AdminPromptRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(.tertiarySystemBackground))
         )
+    }
+    
+    private func activatePrompt() {
+        isActivating = true
+        Task {
+            let success = await adminService.activatePrompt(prompt.id)
+            await MainActor.run {
+                isActivating = false
+                if success {
+                    print("✅ Prompt '\(prompt.title)' activated successfully")
+                } else {
+                    print("❌ Failed to activate prompt '\(prompt.title)'")
+                }
+            }
+        }
     }
     
     private var dateFormatter: DateFormatter {
@@ -782,6 +822,21 @@ struct CreatePromptView: View {
     private var schedulingSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             SectionHeader(title: "Scheduling", icon: "calendar")
+            
+            // Info message
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundColor(.blue)
+                    .font(.subheadline)
+                
+                Text("Prompts must be activated to appear for users. Use 'Activate Immediately' or activate manually from the admin dashboard.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .background(Color.blue.opacity(0.1))
+            .cornerRadius(8)
             
             VStack(spacing: 12) {
                 // Activate immediately toggle

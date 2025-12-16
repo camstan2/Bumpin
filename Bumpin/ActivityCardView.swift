@@ -62,13 +62,11 @@ struct ActivityCardView: View {
                         .foregroundColor(.primary)
                         .lineLimit(2)
                     if let rating = activity.rating {
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= rating ? "star.fill" : "star")
-                                    .foregroundColor(.yellow)
-                                    .font(.caption)
-                            }
-                        }
+                        StarRatingDisplayView(
+                            rating: Double(rating),
+                            starSize: 12,
+                            spacing: 1
+                        )
                     }
                 }
                 if let comment = activity.commentText, activity.type == .comment {

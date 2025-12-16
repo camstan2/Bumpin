@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseStorage
+import MusicKit
 
 struct CreateListView: View {
     @Environment(\.presentationMode) var presentationMode
@@ -64,9 +65,9 @@ struct CreateListView: View {
                             Image(systemName: "music.note")
                                 .font(.system(size: 28))
                                 .foregroundColor(.gray)
-                            Text("No items yet.")
+                            Text("No songs yet.")
                                 .foregroundColor(.secondary)
-                            Text("Tap 'Search & Add Music' to add songs, albums, or artists")
+                            Text("Tap 'Search & Add Music' to add songs to your list")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -108,18 +109,21 @@ struct CreateListView: View {
             .navigationTitle("Create List")
             .navigationBarItems(leading: Button("Cancel") { presentationMode.wrappedValue.dismiss() })
         }
-        .sheet(isPresented: $showMusicSearch) {
-            ListMusicSearchView(onItemsSelected: { selectedItems in
-                // Add selected items to the list
-                for item in selectedItems {
-                    if let jsonData = try? JSONEncoder().encode(item),
+        .fullScreenCover(isPresented: $showMusicSearch) {
+            ComprehensiveSearchView(
+                listSelectionMode: true,
+                onSongsSelected: { selectedSongs in
+                    // Add selected songs to the list
+                    for song in selectedSongs {
+                        if let jsonData = try? JSONEncoder().encode(song),
                        let jsonString = String(data: jsonData, encoding: .utf8) {
                         if !items.contains(jsonString) {
                             items.append(jsonString)
+                            }
                         }
                     }
                 }
-            })
+            )
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $coverImage)
@@ -215,8 +219,10 @@ struct CreateListView: View {
                 }
                 Spacer()
                 Button(action: {
-                    if let itemIndex = items.firstIndex(of: item) {
-                        items.remove(at: itemIndex)
+                    withAnimation {
+                        if index >= 0 && index < items.count {
+                    items.remove(at: index)
+                        }
                     }
                 }) {
                     Image(systemName: "minus.circle.fill")
@@ -230,8 +236,10 @@ struct CreateListView: View {
                     .font(.subheadline)
                 Spacer()
                 Button(action: {
-                    if let itemIndex = items.firstIndex(of: item) {
-                        items.remove(at: itemIndex)
+                    withAnimation {
+                        if index >= 0 && index < items.count {
+                    items.remove(at: index)
+                        }
                     }
                 }) {
                     Image(systemName: "minus.circle.fill")
@@ -239,235 +247,6 @@ struct CreateListView: View {
                 }
             }
             .padding(.vertical, 4)
-        }
-    }
-}
-
-// MARK: - List Music Search View
-struct ListMusicSearchView: View {
-    @Environment(\.presentationMode) var presentationMode
-    @State private var selectedTab: ListSearchTab = .songs
-    @State private var searchText = ""
-    @State private var searchResults: [MusicSearchResult] = []
-    @State private var isSearching = false
-    @State private var searchErrorMessage: String?
-    @State private var selectedItems: [MusicSearchResult] = []
-    
-    let onItemsSelected: ([MusicSearchResult]) -> Void
-    
-    enum ListSearchTab: String, CaseIterable, Identifiable {
-        case songs = "Songs"
-        case artists = "Artists"
-        case albums = "Albums"
-        var id: String { rawValue }
-    }
-    
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
-                // Search Tabs
-                Picker("Search Type", selection: $selectedTab) {
-                    ForEach(ListSearchTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
-                    }
-                }
-                .pickerStyle(SegmentedPickerStyle())
-                .padding([.horizontal, .top])
-                
-                // Search Bar
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.gray)
-                    TextField(searchPlaceholder, text: $searchText)
-                        .textInputAutocapitalization(.never)
-                        .disableAutocorrection(true)
-                        .onSubmit {
-                            Task { await performSearch(query: searchText) }
-                        }
-                    if isSearching {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                    }
-                }
-                .padding(10)
-                .background(Color(.systemGray6))
-                .cornerRadius(10)
-                .padding(.horizontal)
-                .padding(.top, 8)
-                
-                // Selected items indicator
-                if !selectedItems.isEmpty {
-                    HStack {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.purple)
-                        Text("\(selectedItems.count) item\(selectedItems.count == 1 ? "" : "s") selected")
-                            .font(.subheadline)
-                            .foregroundColor(.purple)
-                        Spacer()
-                        Button("Clear All") {
-                            selectedItems.removeAll()
-                        }
-                        .font(.caption)
-                        .foregroundColor(.purple)
-                    }
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                    .background(Color.purple.opacity(0.1))
-                    .cornerRadius(8)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                }
-                
-                // Search Results
-                if let error = searchErrorMessage {
-                    Text(error)
-                        .foregroundColor(.red)
-                        .padding()
-                }
-                
-                if !filteredResults.isEmpty {
-                    List(filteredResults) { result in
-                        resultRow(for: result)
-                    }
-                    .listStyle(PlainListStyle())
-                } else {
-                    VStack(spacing: 16) {
-                        Image(systemName: searchIcon)
-                            .font(.system(size: 40))
-                            .foregroundColor(.gray)
-                        Text("Search for \(selectedTab.rawValue.lowercased())")
-                            .font(.headline)
-                            .foregroundColor(.secondary)
-                        Text("Find \(selectedTab.rawValue.lowercased()) to add to your list")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding()
-                }
-                
-                Spacer()
-            }
-            .navigationTitle("Add Music")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
-                        presentationMode.wrappedValue.dismiss()
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Add (\(selectedItems.count))") {
-                        onItemsSelected(selectedItems)
-                        presentationMode.wrappedValue.dismiss()
-                    }
-                    .disabled(selectedItems.isEmpty)
-                }
-            }
-            .onChange(of: selectedTab) { _, _ in
-                // Clear results when switching tabs
-                            searchResults = []
-            searchErrorMessage = nil
-            }
-        }
-    }
-    
-    private var searchPlaceholder: String {
-        switch selectedTab {
-        case .songs:
-            return "Search for songs..."
-        case .artists:
-            return "Search for artists..."
-        case .albums:
-            return "Search for albums..."
-        }
-    }
-    
-    private var searchIcon: String {
-        switch selectedTab {
-        case .songs:
-            return "music.note"
-        case .artists:
-            return "person.fill"
-        case .albums:
-            return "opticaldisc"
-        }
-    }
-    
-    private var filteredResults: [MusicSearchResult] {
-        switch selectedTab {
-        case .songs:
-            return searchResults.filter { $0.itemType == "song" }
-        case .artists:
-            return searchResults.filter { $0.itemType == "artist" }
-        case .albums:
-            return searchResults.filter { $0.itemType == "album" }
-        }
-    }
-    
-    private func performSearch(query: String) async {
-        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
-            searchResults = []
-            return
-        }
-        isSearching = true
-        // TODO: Implement actual search using MusicKit
-        // For now, just simulate search
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
-        isSearching = false
-    }
-    
-    private func toggleSelection(_ result: MusicSearchResult) {
-        if let index = selectedItems.firstIndex(where: { $0.id == result.id }) {
-            selectedItems.remove(at: index)
-        } else {
-            selectedItems.append(result)
-        }
-    }
-    
-    @ViewBuilder
-    private func resultRow(for result: MusicSearchResult) -> some View {
-        HStack(spacing: 12) {
-            // Selection indicator
-            Button(action: {
-                toggleSelection(result)
-            }) {
-                Image(systemName: selectedItems.contains(where: { $0.id == result.id }) ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(selectedItems.contains(where: { $0.id == result.id }) ? .purple : .gray)
-                    .font(.title2)
-            }
-            // Artwork
-            EnhancedArtworkView(
-                artworkUrl: result.artworkURL,
-                itemType: result.itemType,
-                size: 44
-            )
-            // Text content
-            VStack(alignment: .leading, spacing: 2) {
-                Text(result.title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                if !result.artistName.isEmpty {
-                    Text(result.artistName)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Text(result.itemType.capitalized)
-                    .font(.caption2)
-                    .foregroundColor(.purple)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.purple.opacity(0.1))
-                    )
-            }
-            Spacer()
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            toggleSelection(result)
         }
     }
 } 

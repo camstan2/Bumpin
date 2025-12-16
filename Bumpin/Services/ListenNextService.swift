@@ -73,7 +73,8 @@ class ListenLaterService: ObservableObject {
     // MARK: - Setup Real-time Listeners
     private func setupRealtimeListeners(for userId: String) {
         let db = Firestore.firestore()
-        
+        let collection = ListenLaterItem.collection(for: userId)
+
         // Stop existing listeners first to avoid duplicates
         stopListeners()
         
@@ -87,8 +88,7 @@ class ListenLaterService: ObservableObject {
         }
         
         // Songs listener - simplified query to avoid index requirement
-        songListener = db.collection("listenLater")
-            .whereField("userId", isEqualTo: userId)
+        songListener = collection
             .whereField("itemType", isEqualTo: ListenLaterItemType.song.rawValue)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self = self else { return }
@@ -105,15 +105,19 @@ class ListenLaterService: ObservableObject {
                 // Sort manually by addedAt since we can't use orderBy without index
                 let sortedItems = items.sorted { $0.addedAt > $1.addedAt }
                 print("🎵 Listen Later songs updated: \(sortedItems.count) items")
-                DispatchQueue.main.async {
-                    self.songItems = sortedItems
+                
+                // Fetch ratings for items that don't have them
+                Task {
+                    let itemsWithRatings = await self.enrichItemsWithRatings(sortedItems)
+                    await MainActor.run {
+                        self.songItems = itemsWithRatings
                     self.isLoadingSongs = false
+                    }
                 }
             }
         
         // Albums listener - simplified query to avoid index requirement
-        albumListener = db.collection("listenLater")
-            .whereField("userId", isEqualTo: userId)
+        albumListener = collection
             .whereField("itemType", isEqualTo: ListenLaterItemType.album.rawValue)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self = self else { return }
@@ -130,15 +134,19 @@ class ListenLaterService: ObservableObject {
                 // Sort manually by addedAt since we can't use orderBy without index
                 let sortedItems = items.sorted { $0.addedAt > $1.addedAt }
                 print("🎵 Listen Later albums updated: \(sortedItems.count) items")
-                DispatchQueue.main.async {
-                    self.albumItems = sortedItems
+                
+                // Fetch ratings for items that don't have them
+                Task {
+                    let itemsWithRatings = await self.enrichItemsWithRatings(sortedItems)
+                    await MainActor.run {
+                        self.albumItems = itemsWithRatings
                     self.isLoadingAlbums = false
+                    }
                 }
             }
         
         // Artists listener - simplified query to avoid index requirement  
-        artistListener = db.collection("listenLater")
-            .whereField("userId", isEqualTo: userId)
+        artistListener = collection
             .whereField("itemType", isEqualTo: ListenLaterItemType.artist.rawValue)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self = self else { return }
@@ -155,11 +163,153 @@ class ListenLaterService: ObservableObject {
                 // Sort manually by addedAt since we can't use orderBy without index
                 let sortedItems = items.sorted { $0.addedAt > $1.addedAt }
                 print("🎵 Listen Later artists updated: \(sortedItems.count) items")
-                DispatchQueue.main.async {
-                    self.artistItems = sortedItems
+                
+                // Fetch ratings for items that don't have them
+                Task {
+                    let itemsWithRatings = await self.enrichItemsWithRatings(sortedItems)
+                    await MainActor.run {
+                        self.artistItems = itemsWithRatings
                     self.isLoadingArtists = false
                 }
             }
+            }
+    }
+    
+    // MARK: - Enrich Items with Ratings
+    private func enrichItemsWithRatings(_ items: [ListenLaterItem]) async -> [ListenLaterItem] {
+        let db = Firestore.firestore()
+        
+        // Separate artists from other items for batch processing
+        let artistItems = items.filter { $0.itemType == .artist }
+        let otherItems = items.filter { $0.itemType != .artist }
+        
+        // Fetch all artist ratings at once using the same service as ArtistProfileView
+        var artistRatingsMap: [String: (average: Double, count: Int)] = [:]
+        if !artistItems.isEmpty {
+            let artistNames = artistItems.map { $0.title }
+            let ratings = await ArtistRatingsService.shared.fetchRatings(for: artistNames)
+            for (name, summary) in ratings {
+                artistRatingsMap[name] = (summary.average, summary.count)
+            }
+        }
+        
+        // Process items in order, applying ratings
+        var enrichedItems: [ListenLaterItem] = []
+        
+        for item in items {
+            var updatedItem = item
+            
+            if item.itemType == .artist {
+                // Use ArtistRatingsService for artists (same as ArtistProfileView)
+                if let ratingData = artistRatingsMap[item.title], ratingData.count > 0 {
+                    updatedItem.averageRating = ratingData.average
+                    updatedItem.totalRatings = ratingData.count
+                    print("📊 Fetched artist rating for \(item.title): \(String(format: "%.1f", ratingData.average)) (\(ratingData.count) ratings)")
+                }
+            } else {
+                // Handle songs and albums using universal track ID (same as profile view)
+                if item.averageRating == nil || item.totalRatings == 0 {
+                    do {
+                        // Get universal track ID for cross-platform aggregation
+                        let universalTrackId = await getUniversalTrackId(
+                            itemId: item.itemId,
+                            title: item.title,
+                            artistName: item.artistName,
+                            albumName: item.albumName,
+                            itemType: item.itemType
+                        )
+                        
+                        var snapshot: QuerySnapshot?
+                        
+                        if let universalId = universalTrackId {
+                            // Query by universalTrackId (cross-platform aggregation - same as profile view)
+                            snapshot = try? await db.collection("logs")
+                                .whereField("universalTrackId", isEqualTo: universalId)
+                                .getDocuments()
+                            
+                            if let snap = snapshot, !snap.documents.isEmpty {
+                                print("📊 Using universal track ID for \(item.title) (cross-platform)")
+                            }
+                        } else {
+                            snapshot = nil
+                        }
+                        
+                        // Fallback to itemId query if universal track not found
+                        if snapshot == nil || snapshot?.documents.isEmpty == true {
+                            print("⚠️ Universal track not found for \(item.title), falling back to itemId query")
+                            snapshot = try await db.collection("logs")
+                                .whereField("itemId", isEqualTo: item.itemId)
+                                .whereField("itemType", isEqualTo: item.itemType.rawValue)
+                                .getDocuments()
+                        }
+                        
+                        let documents = snapshot?.documents ?? []
+                        
+                        // Calculate average rating (same logic as profile view - exact match)
+                        var totalRating = 0.0
+                        var ratingCount = 0
+                        
+                        for document in documents {
+                            let data = document.data()
+                            
+                            // Handle both Int and Double ratings (backwards compatibility - same as profile view)
+                            var rating: Double? = nil
+                            if let doubleRating = data["rating"] as? Double {
+                                rating = doubleRating
+                            } else if let intRating = data["rating"] as? Int {
+                                rating = Double(intRating)
+                            }
+                            
+                            if let rating = rating, rating > 0 {
+                                totalRating += rating
+                                ratingCount += 1
+                            }
+                        }
+                        
+                        if ratingCount > 0 {
+                            let averageRating = totalRating / Double(ratingCount)
+                            updatedItem.averageRating = averageRating
+                            updatedItem.totalRatings = ratingCount
+                            
+                            print("📊 Fetched ratings for \(item.title): \(String(format: "%.1f", averageRating)) (\(ratingCount) ratings)")
+                        }
+                    } catch {
+                        print("❌ Failed to fetch ratings for \(item.title): \(error)")
+                    }
+                }
+            }
+            
+            enrichedItems.append(updatedItem)
+        }
+        
+        return enrichedItems
+    }
+    
+    // MARK: - Universal Track ID Helper
+    
+    /// Get universal track ID for cross-platform rating aggregation (same as profile view)
+    private func getUniversalTrackId(
+        itemId: String,
+        title: String,
+        artistName: String,
+        albumName: String?,
+        itemType: ListenLaterItemType
+    ) async -> String? {
+        // Assume Apple Music for Listen Later items (itemId is typically Apple Music ID)
+        // This matches how profile view determines platform
+        let platform = "apple_music"
+        
+        // For albums, use title as album name; for songs, use albumName field
+        let albumNameForMatching = itemType == .album ? title : albumName
+        
+        let universalTrack = await TrackMatchingService.shared.getUniversalTrack(
+            title: title,
+            artist: artistName,
+            albumName: albumNameForMatching,
+            appleMusicId: itemId
+        )
+        
+        return universalTrack.id
     }
     
     // MARK: - Add Item to Listen Later
@@ -241,7 +391,7 @@ class ListenLaterService: ObservableObject {
     // MARK: - Remove Item from Listen Later
     func removeItem(_ item: ListenLaterItem) async -> Bool {
         do {
-            try await ListenLaterItem.removeItem(id: item.id)
+            try await ListenLaterItem.removeItem(id: item.id, userId: item.userId)
             print("✅ Removed from Listen Later: \(item.title)")
             AnalyticsService.shared.logTap(category: "listen_later_remove", id: "\(item.itemType.rawValue)_\(item.itemId)")
             return true
@@ -260,9 +410,10 @@ class ListenLaterService: ObservableObject {
             
             let db = Firestore.firestore()
             let batch = db.batch()
-            
+            let collection = ListenLaterItem.collection(for: userId)
+
             for item in items {
-                let docRef = db.collection("listenLater").document(item.id)
+                let docRef = collection.document(item.id)
                 batch.deleteDocument(docRef)
             }
             

@@ -20,6 +20,12 @@ class AuthViewModel: ObservableObject {
     init() {
         handle = Auth.auth().addStateDidChangeListener { _, user in
             self.isLoggedIn = (user != nil)
+            if let user {
+                UsernameDirectoryService.shared.ensureEntry(for: user)
+                Task {
+                    await BumpinApp.initializeTrendingTopicsIfNeeded()
+                }
+            }
         }
     }
     
@@ -43,8 +49,14 @@ struct BumpinApp: App {
     @StateObject private var authViewModel = AuthViewModel()
     @StateObject private var locationManager = LocationManager()
     @StateObject private var nowPlayingManager = NowPlayingManager()
+    @StateObject private var nowPlayingSyncService = NowPlayingSyncService.shared
+    @StateObject private var appearanceManager = AppearanceManager.shared
     @StateObject private var adminState = AdminState()
     @StateObject private var termsManager = TermsAcceptanceManager()
+    @StateObject private var audioCoordinator = AudioSessionCoordinator.shared
+    @StateObject private var spotifyService = SpotifyService.shared
+    @StateObject private var partyManager = PartyManager()
+    @StateObject private var discussionManager = DiscussionManager()
     private static var scoringListener: ListenerRegistration?
     @State private var joinBannerMessage: String? = nil
     @State private var showMusicPlatformOnboarding = false
@@ -52,15 +64,31 @@ struct BumpinApp: App {
     @State private var showTermsOfService = false
     
     init() {
+        let startTime = Date()
+        print("🚀 [AppLaunch] Starting app initialization...")
+        
+        // CRITICAL: Check for UserDefaults corruption BEFORE any services load
+        Self.checkAndClearUserDefaultsCorruption()
+        
         FirebaseApp.configure()
+        print("⏱️ [AppLaunch] Firebase configured: \(Date().timeIntervalSince(startTime) * 1000)ms")
+        
         // Register BG task handler once and schedule first request
         BGRefreshManager.shared.scheduleBackgroundRefresh()
         
-        // Run the one-off migration only when a user is signed in to avoid
-        // Firestore rules errors for unauthenticated reads at app launch.
+        // Defer non-critical initialization to avoid blocking launch
+        Task.detached(priority: .background) {
+            // Initialize audio session coordinator in background
+            _ = await AudioSessionCoordinator.shared
+            print("⏱️ [AppLaunch] Audio coordinator initialized (background)")
+        }
+        
+        // Run migrations asynchronously to not block launch
         if Auth.auth().currentUser != nil {
-            Task {
+            Task.detached(priority: .utility) {
+                let migrationStart = Date()
                 await FirestoreMigrationManager.shared.runMigrationsIfNeeded()
+                print("⏱️ [AppLaunch] Migrations completed: \(Date().timeIntervalSince(migrationStart) * 1000)ms")
             }
         } else {
             print("ℹ️ Skipping MusicList migration at launch (no signed-in user).")
@@ -166,8 +194,6 @@ struct BumpinApp: App {
                         }
                     }
                 } else {
-                    let partyManager = PartyManager()
-                    let discussionManager = DiscussionManager()
                     let mockNotificationService = MockNotificationService.shared
                     MainTabScaffold(
                         authViewModel: authViewModel
@@ -179,13 +205,10 @@ struct BumpinApp: App {
                     .environmentObject(adminState)
                     .environmentObject(mockNotificationService)
                     .environmentObject(termsManager)
+                    .environmentObject(AlertCenter.shared)
+                    .preferredColorScheme(appearanceManager.currentColorScheme)
                 .onAppear {
-                    // Start notification service listening
-                    NotificationService.shared.startListening()
-                }
-                .onDisappear {
-                    // Stop notification service listening
-                    NotificationService.shared.stopListening()
+                    // Start notification service listening (already auto-starts in init)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                     // Handle app entering background
@@ -201,6 +224,9 @@ struct BumpinApp: App {
                     
                     // Minimized DJ Stream Indicator - Floating overlay
                     MinimizedDJStreamIndicator(djService: DJStreamService.shared)
+                    
+                    // Minimized Preview Indicator - Floating overlay
+                    MinimizedPreviewIndicator()
                     
                     // Social Rating Prompt Container - Floating overlay
                     SocialRatingPromptContainer()
@@ -247,6 +273,15 @@ struct BumpinApp: App {
                 }
                 .onAppear { adminState.start() }
                 .onOpenURL { url in
+                    // Handle Spotify OAuth callback
+                    if url.scheme == "bumpin" && url.host == "spotify-callback" {
+                        Task {
+                            await spotifyService.handleOAuthCallback(url: url)
+                        }
+                        return
+                    }
+                    
+                    // Handle party join codes
                     if let code = DeepLinkParser.parseJoinCode(from: url) {
                         joinBannerMessage = "Joining party…"
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { joinBannerMessage = nil }
@@ -279,6 +314,7 @@ struct BumpinApp: App {
                 }
             } else {
                 LoginSignupView()
+                    .preferredColorScheme(appearanceManager.currentColorScheme)
             }
         }
         // Removed .backgroundTask modifier to avoid duplicate registration; BGRefreshManager handles registration
@@ -288,6 +324,60 @@ struct BumpinApp: App {
 // MARK: - BumpinApp Extensions
 
 extension BumpinApp {
+    // MARK: - UserDefaults Corruption Detection
+    
+    /// Global corruption detection and clearing - runs on every app launch
+    static func checkAndClearUserDefaultsCorruption() {
+        let defaults = UserDefaults.standard
+        let criticalKeys = [
+            "recentSearches",
+            "recentlyTappedItems",
+            "recently_tapped_items",
+            "recently_tapped_items_diary",
+            "searchHistory",
+            "cachedData"
+        ]
+        
+        var totalSize = 0
+        var corruptedKeys: [String] = []
+        
+        print("🔍 [UserDefaults] Starting corruption check...")
+        
+        // Check each critical key for corruption
+        for key in criticalKeys {
+            if let data = defaults.data(forKey: key) {
+                let sizeMB = Double(data.count) / 1_048_576.0
+                totalSize += data.count
+                
+                if data.count >= 4_000_000 {
+                    print("🚨 CRITICAL: '\(key)' is corrupted (\(String(format: "%.2f", sizeMB)) MB)")
+                    corruptedKeys.append(key)
+                } else if data.count > 1_000_000 {
+                    print("⚠️ WARNING: '\(key)' is large (\(String(format: "%.2f", sizeMB)) MB)")
+                    corruptedKeys.append(key)
+                }
+            }
+        }
+        
+        let totalSizeMB = Double(totalSize) / 1_048_576.0
+        print("📊 [UserDefaults] Total size of critical keys: \(String(format: "%.2f", totalSizeMB)) MB")
+        
+        // If any keys are corrupted, clear them immediately
+        if !corruptedKeys.isEmpty {
+            print("🗑️  [UserDefaults] Clearing \(corruptedKeys.count) corrupted keys: \(corruptedKeys)")
+            
+            for key in corruptedKeys {
+                defaults.removeObject(forKey: key)
+                print("   ✅ Cleared '\(key)'")
+            }
+            
+            defaults.synchronize()
+            print("✅ [UserDefaults] Corruption cleared - app can now proceed safely")
+        } else {
+            print("✅ [UserDefaults] No corruption detected")
+        }
+    }
+    
     // MARK: - Onboarding Logic
     
     private func checkForOnboarding() {
@@ -327,6 +417,10 @@ extension BumpinApp {
     // MARK: - Trending Topics Initialization
     
     static func initializeTrendingTopicsIfNeeded() async {
+        guard Auth.auth().currentUser != nil else {
+            print("ℹ️ Skipping trending topic initialization (no authenticated user)")
+            return
+        }
         // Initialize the new user-statistics-based trending system
         await DiscussionTopicSeedService.shared.seedInitialTopicsIfNeeded()
         

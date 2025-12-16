@@ -228,15 +228,36 @@ struct PopularityGraphView: View {
     }
     
     private var chartEmptyView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.title2)
-                .foregroundColor(.gray)
-            Text("No data available")
-                .font(.headline)
-            Text("No logs found for this time period")
-                .font(.caption)
-                .foregroundColor(.secondary)
+        VStack(spacing: 14) {
+            // Enhanced icon with subtle animation
+            ZStack {
+                Circle()
+                    .fill(Color(.systemGray6))
+                    .frame(width: 60, height: 60)
+                
+                Image(systemName: "chart.line.uptrend.xyaxis")
+                    .font(.title)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.gray, .gray.opacity(0.6)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+            
+            VStack(spacing: 6) {
+                Text("No Activity Yet")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+                
+                Text("Logs will appear here once users\nstart rating this \(itemType)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+            }
         }
         .frame(height: 200)
         .frame(maxWidth: .infinity)

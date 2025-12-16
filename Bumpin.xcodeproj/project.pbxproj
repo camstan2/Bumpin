@@ -14,6 +14,7 @@
 		16A8A5482E5A153400C20F44 /* FirebaseAnalyticsIdentitySupport in Frameworks */ = {isa = PBXBuildFile; productRef = 16A8A5472E5A153400C20F44 /* FirebaseAnalyticsIdentitySupport */; };
 		16A8A54C2E5A15AD00C20F44 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 16A8A54B2E5A15AD00C20F44 /* FirebaseCore */; };
 		16A8A54E2E5A15AD00C20F44 /* FirebaseCrashlytics in Frameworks */ = {isa = PBXBuildFile; productRef = 16A8A54D2E5A15AD00C20F44 /* FirebaseCrashlytics */; };
+		16E212232EBF814C0041E5B2 /* FirebaseFunctions in Frameworks */ = {isa = PBXBuildFile; productRef = 16E212222EBF814C0041E5B2 /* FirebaseFunctions */; };
 		16FBA3152E10995800EBBDF4 /* MediaPlayer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 16FBA3142E10995800EBBDF4 /* MediaPlayer.framework */; };
 /* End PBXBuildFile section */
 
@@ -45,6 +46,7 @@
 		16E729BC2E2C2000008A1CD6 /* Exceptions for "Bumpin" folder in "Bumpin" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				firestore.rules,
 				Info.plist,
 				Untitled.swift,
 			);
@@ -81,6 +83,7 @@
 				16FBA3152E10995800EBBDF4 /* MediaPlayer.framework in Frameworks */,
 				16A8A54C2E5A15AD00C20F44 /* FirebaseCore in Frameworks */,
 				160784982E131C5E00147513 /* FirebaseStorage in Frameworks */,
+				16E212232EBF814C0041E5B2 /* FirebaseFunctions in Frameworks */,
 				16563C762EA5BEBE008B0E86 /* RtcBasic in Frameworks */,
 				16A8A54E2E5A15AD00C20F44 /* FirebaseCrashlytics in Frameworks */,
 				160784962E131C5E00147513 /* FirebaseFirestore in Frameworks */,
@@ -162,6 +165,7 @@
 				16A8A54B2E5A15AD00C20F44 /* FirebaseCore */,
 				16A8A54D2E5A15AD00C20F44 /* FirebaseCrashlytics */,
 				16563C752EA5BEBE008B0E86 /* RtcBasic */,
+				16E212222EBF814C0041E5B2 /* FirebaseFunctions */,
 			);
 			productName = Bumpin;
 			productReference = 16FBA2EA2E10995500EBBDF4 /* Bumpin.app */;
@@ -708,6 +712,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 160784862E1317E700147513 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseCrashlytics;
+		};
+		16E212222EBF814C0041E5B2 /* FirebaseFunctions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 160784862E1317E700147513 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFunctions;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

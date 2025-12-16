@@ -50,8 +50,9 @@ struct ContentView: View {
             NotificationCenter.default.addObserver(forName: NSNotification.Name("OpenUserProfile"), object: nil, queue: .main) { note in
                 if let userId = note.object as? String {
                     // Present the profile in full-screen (iOS 15+ safe window scene lookup)
+                    // Show simplified profile (overview only) when opened from notifications/deep links
                     let hosting = UIHostingController(rootView: NavigationView {
-                        UserProfileView(userId: userId)
+                        UserProfileView(userId: userId, showFullProfile: false)
                             .navigationBarTitleDisplayMode(.inline)
                             .toolbar {
                                 ToolbarItem(placement: .navigationBarLeading) {

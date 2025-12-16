@@ -74,22 +74,21 @@ struct DiaryMainSearchView: View {
                 // Tab selector (Search and Apple Music Library)
                 tabSelector
                 
-                // Tab content
-                TabView(selection: $selectedTab) {
-                    searchTabView
-                        .tag(SearchTab.search)
-                    
-                    if availableTabs.contains(.appleMusicLibrary) {
-                        appleMusicLibraryTabView
-                            .tag(SearchTab.appleMusicLibrary)
-                    }
-                    
-                    if availableTabs.contains(.spotifyLibrary) {
-                        spotifyLibraryTabView
-                            .tag(SearchTab.spotifyLibrary)
+                // Tab content (swipe disabled - tap only)
+                Group {
+                    switch selectedTab {
+                    case .search:
+                        searchTabView
+                    case .appleMusicLibrary:
+                        if availableTabs.contains(.appleMusicLibrary) {
+                            appleMusicLibraryTabView
+                        }
+                    case .spotifyLibrary:
+                        if availableTabs.contains(.spotifyLibrary) {
+                            spotifyLibraryTabView
+                        }
                     }
                 }
-                .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
             }
             .navigationTitle("Search Music")
             .navigationBarTitleDisplayMode(.inline)
@@ -149,6 +148,15 @@ struct DiaryMainSearchView: View {
                 LogMusicFormView(searchResult: artistResult)
             }
         }
+        .onChange(of: spotifyService.isUserAuthenticated) { newValue in
+            print("🔍 [DiaryMainSearchView] isUserAuthenticated changed to \(newValue)")
+            if newValue {
+                Task { await unifiedLibraryService.loadSpotifyLibrary() }
+            } else {
+                // Clear library data if user logs out
+                unifiedLibraryService.spotifyLibraryData = UnifiedLibraryService.SpotifyLibraryData()
+            }
+        }
     }
     
     // MARK: - Tab Selector
@@ -183,14 +191,17 @@ struct DiaryMainSearchView: View {
         VStack(spacing: 0) {
             // Search Header
             searchHeader
-            
-            // Search Content
-            if searchText.isEmpty {
-                emptySearchState
-            } else if isLoading {
-                SearchLoadingView()
-            } else {
-                searchResultsView
+            // Content with loading overlay
+            ZStack {
+                if searchText.isEmpty {
+                    emptySearchState
+                } else {
+                    searchResultsView
+                }
+                if isLoading {
+                    searchingOverlay
+                        .transition(.opacity)
+                }
             }
         }
     }
@@ -205,6 +216,8 @@ struct DiaryMainSearchView: View {
                 
                 TextField("Search for music, artists, albums...", text: $searchText)
                     .textFieldStyle(PlainTextFieldStyle())
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
                     .onSubmit {
                         if !searchText.isEmpty {
                             handleSearchTextChange(searchText)
@@ -404,9 +417,13 @@ struct DiaryMainSearchView: View {
             spotifyMainLibraryContent
         }
         .onAppear {
+            print("🔍 [DiaryMainSearchView] spotifyLibraryTabView.onAppear called")
+            print("🔍 [DiaryMainSearchView] spotifyService.isUserAuthenticated = \(spotifyService.isUserAuthenticated)")
             if spotifyService.isUserAuthenticated {
                 Task {
+                    print("🔍 [DiaryMainSearchView] Calling loadSpotifyLibrary()...")
                     await unifiedLibraryService.loadSpotifyLibrary()
+                    print("🔍 [DiaryMainSearchView] loadSpotifyLibrary() completed")
                 }
             }
         }
@@ -458,10 +475,12 @@ struct DiaryMainSearchView: View {
             .padding(.horizontal, 20)
             
             // Spotify style horizontal scroll
+            let trackIdsSignature = unifiedLibraryService.spotifyLibraryData.savedTracks.map { $0.id }.joined(separator: ",")
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     ForEach(getSpotifyRecentlyAdded(), id: \.id) { item in
                         SpotifyRecentlyAddedCard(item: item)
+                            .id(item.id) // ensure each card refreshes when item changes
                             .onTapGesture {
                                 // Convert to LibraryItem and handle tap
                                 let libraryItem = LibraryItem(
@@ -479,7 +498,9 @@ struct DiaryMainSearchView: View {
                 .padding(.horizontal, 20)
                 .padding(.trailing, 20)
             }
+            .id("spotify-recently-added-scroll-\(trackIdsSignature)")
         }
+        .id("spotify-recently-added-\(unifiedLibraryService.spotifyLibraryData.savedTracks.count)")
     }
     
     // MARK: - Spotify Library Sections View (matching Apple Music)
@@ -507,7 +528,16 @@ struct DiaryMainSearchView: View {
                     count: getSpotifyLibraryCount(for: "songs"),
                     color: .green
                 ) {
-                    // Handle Spotify songs section tap
+                    print("Tapped Spotify section: Songs")
+                    let section = LibrarySection(
+                        title: "Spotify Songs",
+                        icon: "music.note",
+                        color: .green,
+                        itemCount: getSpotifyLibraryCount(for: "songs"),
+                        itemType: .song
+                    )
+                    selectedLibrarySection = section
+                    libraryViewState = .sectionDetail
                 }
                 
                 // Albums section
@@ -517,7 +547,8 @@ struct DiaryMainSearchView: View {
                     count: getSpotifyLibraryCount(for: "albums"),
                     color: .orange
                 ) {
-                    // Handle Spotify albums section tap
+                    print("Tapped Spotify section: Albums")
+                    // Albums not yet implemented
                 }
                 
                 // Artists section
@@ -527,7 +558,8 @@ struct DiaryMainSearchView: View {
                     count: getSpotifyLibraryCount(for: "artists"),
                     color: .green
                 ) {
-                    // Handle Spotify artists section tap
+                    print("Tapped Spotify section: Artists")
+                    // Artists not yet implemented
                 }
                 
                 // Playlists section
@@ -537,11 +569,21 @@ struct DiaryMainSearchView: View {
                     count: getSpotifyLibraryCount(for: "playlists"),
                     color: .purple
                 ) {
-                    // Handle Spotify playlists section tap
+                    print("Tapped Spotify section: Playlists")
+                    let section = LibrarySection(
+                        title: "Spotify Playlists",
+                        icon: "music.note.list",
+                        color: .purple,
+                        itemCount: getSpotifyLibraryCount(for: "playlists"),
+                        itemType: .playlist
+                    )
+                    selectedLibrarySection = section
+                    libraryViewState = .sectionDetail
                 }
             }
             .padding(.horizontal, 20)
         }
+        .id("spotify-library-sections-\(unifiedLibraryService.spotifyLibraryData.savedTracks.count)-\(unifiedLibraryService.spotifyLibraryData.playlists.count)")
     }
     
     // MARK: - Spotify Authorization Required View
@@ -732,26 +774,44 @@ struct DiaryMainSearchView: View {
     // MARK: - Section Detail View
     private func sectionDetailView(_ section: LibrarySection) -> some View {
         Group {
-            switch section.itemType {
-            case .song:
-                if section.title == "Recently Added" {
-                    RecentlyAddedView(libraryService: libraryService)
-                } else {
-                    SongsLibraryView(libraryService: libraryService)
+            // Check if it's a Spotify section
+            if section.title.contains("Spotify") {
+                // Spotify sections
+                switch section.itemType {
+                case .song:
+                    SpotifySongsLibraryView(unifiedLibraryService: unifiedLibraryService)
+                case .playlist:
+                    SpotifyPlaylistsView(unifiedLibraryService: unifiedLibraryService)
+                default:
+                    Text("Coming Soon")
+                        .foregroundColor(.secondary)
                 }
-            case .album:
-                AlbumsLibraryView(libraryService: libraryService)
-            case .artist:
-                ArtistsLibraryView(libraryService: libraryService)
-            case .playlist:
-                PlaylistsView(libraryService: libraryService)
+            } else {
+                // Apple Music sections
+                switch section.itemType {
+                case .song:
+                    if section.title == "Recently Added" {
+                        RecentlyAddedView(libraryService: libraryService)
+                    } else {
+                        SongsLibraryView(libraryService: libraryService)
+                    }
+                case .album:
+                    AlbumsLibraryView(libraryService: libraryService)
+                case .artist:
+                    ArtistsLibraryView(libraryService: libraryService)
+                case .playlist:
+                    PlaylistsView(libraryService: libraryService)
+                }
             }
         }
     }
     
     // MARK: - Playlist Detail View
     private func playlistDetailView(_ playlist: LibraryPlaylist) -> some View {
-        PlaylistDetailView(playlist: playlist, libraryService: libraryService)
+        PlaylistDetailView(
+            playlist: playlist,
+            libraryService: libraryService
+        )
     }
     
     // MARK: - Library Search Results
@@ -1105,16 +1165,11 @@ struct DiaryMainSearchView: View {
     }
     
     private func saveRecentlyTappedItems() {
-        if let encoded = try? JSONEncoder().encode(recentlyTappedItems) {
-            UserDefaults.standard.set(encoded, forKey: "recently_tapped_items")
-        }
+        recentlyTappedItems = RecentlyTappedStore.save(recentlyTappedItems)
     }
     
     private func loadRecentlyTappedItems() {
-        if let data = UserDefaults.standard.data(forKey: "recently_tapped_items"),
-           let decoded = try? JSONDecoder().decode([RecentlyTappedItem].self, from: data) {
-            recentlyTappedItems = decoded
-        }
+        recentlyTappedItems = RecentlyTappedStore.load()
     }
     
     private func validateSelectedTab() {
@@ -1125,46 +1180,187 @@ struct DiaryMainSearchView: View {
     }
     
     private func getSpotifyRecentlyAdded() -> [MusicSearchResult] {
-        // Return demo data for recently added Spotify songs
-        return [
-            MusicSearchResult(
-                id: "spotify_recent_1",
-                title: "As It Was",
-                artistName: "Harry Styles",
-                albumName: "Harry's House",
-                artworkURL: nil,
-                itemType: "song",
-                popularity: 95
-            ),
-            MusicSearchResult(
-                id: "spotify_recent_2",
-                title: "Heat Waves",
-                artistName: "Glass Animals",
-                albumName: "Dreamland",
-                artworkURL: nil,
-                itemType: "song",
-                popularity: 89
-            ),
-            MusicSearchResult(
-                id: "spotify_recent_3",
-                title: "Good 4 U",
-                artistName: "Olivia Rodrigo",
-                albumName: "SOUR",
-                artworkURL: nil,
-                itemType: "song",
-                popularity: 88
-            )
-        ]
+        print("🔍 [DiaryMainSearchView] getSpotifyRecentlyAdded() called")
+        // Return real saved tracks from Spotify API
+        let savedTracks = unifiedLibraryService.getSpotifySavedTracks()
+        print("🔍 [DiaryMainSearchView] Got \(savedTracks.count) saved tracks from service")
+        
+        // Return the first 10 tracks (most recent)
+        let result = Array(savedTracks.prefix(10))
+        print("🔍 [DiaryMainSearchView] Returning \(result.count) tracks for Recently Added")
+        if result.count > 0 {
+            print("🔍 [DiaryMainSearchView] First track in UI: \(result[0].title) by \(result[0].artistName)")
+        }
+        return result
     }
     
     private func getSpotifyLibraryCount(for section: String) -> Int {
-        // Return demo counts for Spotify library sections
+        // Return real counts from Spotify library data
+        let stats = unifiedLibraryService.getSpotifyLibraryStats()
+        
         switch section {
-        case "songs": return 1247
-        case "albums": return 89
-        case "artists": return 156
-        case "playlists": return 23
+        case "songs": return stats.savedTracks
+        case "albums": return 0 // Albums not yet implemented
+        case "artists": return 0 // Artists not yet implemented
+        case "playlists": return stats.playlists
         default: return 0
         }
     }
+    
+    // MARK: - Searching Overlay
+    private var searchingOverlay: some View {
+        ZStack {
+            Color.clear
+            HStack(spacing: 10) {
+                ProgressView()
+                    .scaleEffect(1.2)
+                Text("Searching...")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: Color.black.opacity(0.15), radius: 12, y: 6)
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+    }
 }
+
+// MARK: - Spotify Library Views
+
+struct SpotifySongsLibraryView: View {
+    @ObservedObject var unifiedLibraryService: UnifiedLibraryService
+    
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                let songs = unifiedLibraryService.getSpotifySavedTracks()
+                
+                if songs.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 50))
+                            .foregroundColor(.green.opacity(0.5))
+                        Text("No saved songs")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 100)
+                } else {
+                    ForEach(songs) { song in
+                        SpotifySongRow(song: song) {
+                            // Convert to MusicSearchResult and post notification
+                            NotificationCenter.default.post(
+                                name: NSNotification.Name("LibraryItemTapped"),
+                                object: song
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
+struct SpotifyPlaylistsView: View {
+    @ObservedObject var unifiedLibraryService: UnifiedLibraryService
+    
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                let playlists = unifiedLibraryService.getSpotifyPlaylists()
+                
+                if playlists.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "music.note.list")
+                            .font(.system(size: 50))
+                            .foregroundColor(.purple.opacity(0.5))
+                        Text("No playlists")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 100)
+                } else {
+                    ForEach(playlists, id: \.id) { playlist in
+                        SpotifyPlaylistRow(playlist: playlist)
+                            .onTapGesture {
+                                // Handle playlist tap
+                                print("Tapped playlist: \(playlist.name)")
+                            }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
+struct SpotifyPlaylistRow: View {
+    let playlist: UnifiedLibraryService.UnifiedPlaylist
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Playlist artwork
+            if let artworkURL = playlist.artworkURL, let url = URL(string: artworkURL) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    case .failure, .empty:
+                        Image(systemName: "music.note.list")
+                            .foregroundColor(.purple.opacity(0.6))
+                            .frame(width: 60, height: 60)
+                            .background(Color.purple.opacity(0.1))
+                    @unknown default:
+                        Color.purple.opacity(0.1)
+                    }
+                }
+                .frame(width: 60, height: 60)
+                .cornerRadius(8)
+            } else {
+                Image(systemName: "music.note.list")
+                    .foregroundColor(.purple.opacity(0.6))
+                    .frame(width: 60, height: 60)
+                    .background(Color.purple.opacity(0.1))
+                    .cornerRadius(8)
+            }
+            
+            // Playlist info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(playlist.name)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                
+                Text("\(playlist.trackCount) songs")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(8)
+    }
+}
+

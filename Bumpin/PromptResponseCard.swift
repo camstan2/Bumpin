@@ -10,6 +10,7 @@ struct PromptResponseCard: View {
     @State private var likeCount = 0
     @State private var commentCount = 0
     @State private var isSubmittingLike = false
+    @EnvironmentObject private var navigationCoordinator: NavigationCoordinator
     
     init(response: PromptResponse, coordinator: DailyPromptCoordinator, showUserInfo: Bool = true, onTap: (() -> Void)? = nil) {
         self.response = response
@@ -54,25 +55,15 @@ struct PromptResponseCard: View {
     
     private var userInfoSection: some View {
         HStack(spacing: 12) {
-            // Profile picture
-            AsyncImage(url: URL(string: response.userProfilePictureUrl ?? "")) { image in
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 32, height: 32)
-                    .clipShape(Circle())
-            } placeholder: {
-                Circle()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 32, height: 32)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(.caption)
-                            .foregroundColor(.gray)
+            Button(action: navigateToAuthorProfile) {
+                HStack(spacing: 12) {
+                    UserAvatarView(
+                        userId: response.userId,
+                        existingUrl: response.userProfilePictureUrl,
+                        initials: response.username,
+                        size: 32
                     )
-            }
-            
-            // User name and timestamp
+                    
             VStack(alignment: .leading, spacing: 2) {
                 Text(response.username)
                     .font(.subheadline)
@@ -83,99 +74,96 @@ struct PromptResponseCard: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
             
             Spacer()
-            
-            // Menu button
-            Menu {
-                Button(action: {
-                    // Share response
-                }) {
-                    Label("Share", systemImage: "square.and.arrow.up")
-                }
-                
-                if response.userId != coordinator.promptService.currentUserId {
-                    Button(action: {
-                        // Report response
-                        Task {
-                            await coordinator.interactionService.reportResponse(response.id, reason: "inappropriate")
-                        }
-                    }) {
-                        Label("Report", systemImage: "flag")
-                    }
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(8)
-                    .background(Circle().fill(Color(.tertiarySystemBackground)))
-            }
         }
     }
     
     // MARK: - Song Info Section
     
     private var songInfoSection: some View {
-        HStack(spacing: 16) {
-            // Album artwork
-            AsyncImage(url: URL(string: response.artworkUrl ?? "")) { image in
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 60, height: 60)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } placeholder: {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(LinearGradient(
-                        colors: [Color.purple.opacity(0.3), Color.blue.opacity(0.3)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 60, height: 60)
-                    .overlay(
-                        Image(systemName: "music.note")
-                            .font(.title3)
-                            .foregroundColor(.white.opacity(0.8))
-                    )
-            }
-            
-            // Song details
-            VStack(alignment: .leading, spacing: 4) {
-                Text(response.songTitle)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
+        Button(action: {
+            // Navigate to song profile
+            navigationCoordinator.navigateToMusicProfile(
+                TrendingItem(
+                    title: response.songTitle,
+                    subtitle: response.artistName,
+                    artworkUrl: response.artworkUrl,
+                    logCount: 0,
+                    averageRating: nil,
+                    itemType: "song",
+                    itemId: response.songId
+                )
+            )
+        }) {
+            HStack(spacing: 16) {
+                // Album artwork
+                AsyncImage(url: URL(string: response.artworkUrl ?? "")) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 60, height: 60)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } placeholder: {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(LinearGradient(
+                            colors: [Color.purple.opacity(0.3), Color.blue.opacity(0.3)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
+                        .frame(width: 60, height: 60)
+                        .overlay(
+                            Image(systemName: "music.note")
+                                .font(.title3)
+                                .foregroundColor(.white.opacity(0.8))
+                        )
+                }
                 
-                Text(response.artistName)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                
-                if let albumName = response.albumName, !albumName.isEmpty {
-                    Text(albumName)
-                        .font(.caption2)
+                // Song details
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(response.songTitle)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    
+                    Text(response.artistName)
+                        .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
+                        .multilineTextAlignment(.leading)
+                    
+                    if let albumName = response.albumName, !albumName.isEmpty {
+                        Text(albumName)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .multilineTextAlignment(.leading)
+                    }
                 }
-            }
-            
-            Spacer()
-            
-            // Play button (if Apple Music URL available)
-            if let appleMusicUrl = response.appleMusicUrl,
-               let url = URL(string: appleMusicUrl) {
-                Button(action: {
-                    UIApplication.shared.open(url)
-                    coordinator.trackPromptEngagement("song_play_tapped")
-                }) {
-                    Image(systemName: "play.circle.fill")
-                        .font(.title2)
-                        .foregroundColor(.purple)
+                
+                Spacer()
+                
+                // Play button (if Apple Music URL available)
+                if let appleMusicUrl = response.appleMusicUrl,
+                   let url = URL(string: appleMusicUrl) {
+                    Button(action: {
+                        UIApplication.shared.open(url)
+                        coordinator.trackPromptEngagement("song_play_tapped")
+                    }) {
+                        Image(systemName: "play.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.purple)
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
             }
         }
+        .buttonStyle(PlainButtonStyle())
     }
     
     // MARK: - Explanation Section
@@ -258,6 +246,10 @@ struct PromptResponseCard: View {
             await coordinator.interactionService.loadLikesForResponse(response.id)
             await coordinator.interactionService.loadCommentsForResponse(response.id)
         }
+    }
+    
+    private func navigateToAuthorProfile() {
+        navigationCoordinator.navigateToUserProfile(response.userId)
     }
     
     private func toggleLike() {

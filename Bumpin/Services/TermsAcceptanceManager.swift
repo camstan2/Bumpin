@@ -18,17 +18,13 @@ class TermsAcceptanceManager: ObservableObject {
     
     func requiresTermsAcceptance() -> Bool {
         guard let _ = Auth.auth().currentUser else {
-            print("🔍 TermsAcceptanceManager.requiresTermsAcceptance: No user, returning false")
             return false
         }
         // Don't show terms screen if we're still checking
         if isCheckingTerms {
-            print("🔍 TermsAcceptanceManager.requiresTermsAcceptance: Still checking, returning false")
             return false
         }
-        let result = !hasAcceptedTerms
-        print("🔍 TermsAcceptanceManager.requiresTermsAcceptance: hasAcceptedTerms=\(hasAcceptedTerms), returning \(result)")
-        return result
+        return !hasAcceptedTerms
     }
     
     func acceptTerms() async -> Bool {
@@ -57,44 +53,32 @@ class TermsAcceptanceManager: ObservableObject {
     }
     
     private func checkTermsAcceptance() async {
-        print("🔍 TermsAcceptanceManager: Starting terms check...")
+        // Reduced logging - only log on first check or errors
         guard let userId = Auth.auth().currentUser?.uid else {
-            print("❌ TermsAcceptanceManager: No user logged in")
             hasAcceptedTerms = false
             isCheckingTerms = false
             isLoading = false
             return
         }
         
-        print("🔍 TermsAcceptanceManager: Checking terms for user: \(userId)")
-        
         do {
             let snapshot = try await db.collection("users").document(userId).getDocument()
             
-            print("🔍 TermsAcceptanceManager: Firestore document fetched, exists: \(snapshot.exists)")
-            
             if let data = snapshot.data() {
-                print("🔍 TermsAcceptanceManager: Document data keys: \(data.keys.joined(separator: ", "))")
-                
-                if let termsAcceptedAt = data["termsAcceptedAt"] {
+                if let _ = data["termsAcceptedAt"] {
                     hasAcceptedTerms = true
-                    print("✅ TermsAcceptanceManager: User HAS accepted terms at: \(termsAcceptedAt)")
                 } else {
                     hasAcceptedTerms = false
-                    print("⚠️ TermsAcceptanceManager: User has NOT accepted terms (field missing)")
                 }
             } else {
                 hasAcceptedTerms = false
-                print("⚠️ TermsAcceptanceManager: User document has no data")
             }
         } catch {
             print("❌ TermsAcceptanceManager: Error checking terms: \(error.localizedDescription)")
-            // On error, assume not accepted to be safe
             hasAcceptedTerms = false
         }
         
         isCheckingTerms = false
         isLoading = false
-        print("🔍 TermsAcceptanceManager: Check complete. hasAcceptedTerms: \(hasAcceptedTerms), isCheckingTerms: \(isCheckingTerms)")
     }
 }

@@ -207,17 +207,36 @@ struct ProfileItemTypeBadge: View {
         }
     }
     
+    private var badgeIcon: String {
+        switch itemType.lowercased() {
+        case "song": return "music.note"
+        case "album": return "square.stack.fill"
+        case "artist": return "person.fill"
+        default: return "music.note"
+        }
+    }
+    
     var body: some View {
-        Text(itemType.capitalized)
-            .font(ProfileDesignSystem.Typography.captionMedium)
-            .fontWeight(.semibold)
-            .foregroundColor(badgeColor)
-            .padding(.horizontal, ProfileDesignSystem.Spacing.sm)
-            .padding(.vertical, ProfileDesignSystem.Spacing.xs)
-            .background(
-                Capsule()
-                    .fill(badgeColor.opacity(0.15))
-            )
+        HStack(spacing: 4) {
+            Image(systemName: badgeIcon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(badgeColor)
+            
+            Text(itemType.capitalized)
+                .font(ProfileDesignSystem.Typography.captionMedium)
+                .fontWeight(.semibold)
+                .foregroundColor(badgeColor)
+        }
+        .padding(.horizontal, ProfileDesignSystem.Spacing.sm)
+        .padding(.vertical, ProfileDesignSystem.Spacing.xs)
+        .background(
+            Capsule()
+                .fill(badgeColor.opacity(0.15))
+                .overlay(
+                    Capsule()
+                        .strokeBorder(badgeColor.opacity(0.3), lineWidth: 0.5)
+                )
+        )
     }
 }
 
@@ -254,69 +273,75 @@ struct ProfileQuickStat: View {
 // MARK: - Display Only Rating Component
 
 struct DisplayOnlyRatingView: View {
-    let userRating: Int
+    let userRating: Double // Changed from Int to Double to support half stars
     let averageRating: Double
     let totalRatings: Int
     
     var body: some View {
-        VStack(spacing: ProfileDesignSystem.Spacing.md) {
-            // Community rating display
-            VStack(spacing: ProfileDesignSystem.Spacing.xs) {
-                HStack(spacing: ProfileDesignSystem.Spacing.sm) {
-                    Text(String(format: "%.1f", averageRating))
-                        .font(ProfileDesignSystem.Typography.headlineLarge)
-                        .fontWeight(.bold)
-                        .foregroundColor(ProfileDesignSystem.Colors.ratingGold)
-                    
-                    HStack(spacing: 2) {
-                        ForEach(1...5, id: \.self) { star in
-                            Image(systemName: star <= Int(averageRating.rounded()) ? "star.fill" : "star")
-                                .font(ProfileDesignSystem.Typography.bodyMedium)
-                                .foregroundColor(ProfileDesignSystem.Colors.ratingGold)
-                        }
+        VStack(spacing: ProfileDesignSystem.Spacing.xl) {
+            // User rating in top-left (subtle) - IMPROVED SPACING - Now with half-star support
+            if userRating > 0 {
+                HStack {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Your Rating")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                            .textCase(.uppercase)
+                            .tracking(0.5)
+                        // Use StarRatingDisplayView for half-star support
+                        StarRatingDisplayView(
+                            rating: userRating,
+                            starSize: 16, // Slightly smaller for the compact "Your Rating" section
+                            spacing: 3,
+                            showNumber: false
+                        )
                     }
-                    
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color(.systemGray6))
+                    )
                     Spacer()
                 }
-                
-                Text("\(totalRatings) ratings")
-                    .font(ProfileDesignSystem.Typography.captionLarge)
-                    .foregroundColor(ProfileDesignSystem.Colors.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             
-            // User rating display (read-only)
-            VStack(alignment: .leading, spacing: ProfileDesignSystem.Spacing.sm) {
-                Text("Your Rating")
-                    .font(ProfileDesignSystem.Typography.bodyMedium)
-                    .fontWeight(.semibold)
-                    .foregroundColor(ProfileDesignSystem.Colors.textPrimary)
+            // Overall rating - HERO section (center of attention) - ENHANCED CARD
+            VStack(spacing: ProfileDesignSystem.Spacing.lg) {
+                // Large rating number
+                Text(String(format: "%.1f", averageRating))
+                    .font(.system(size: 72, weight: .bold, design: .rounded))
+                    .foregroundColor(ProfileDesignSystem.Colors.ratingGold)
+                    .shadow(color: ProfileDesignSystem.Colors.ratingGold.opacity(0.3), radius: 8, x: 0, y: 4)
                 
-                HStack(spacing: ProfileDesignSystem.Spacing.sm) {
-                    if userRating > 0 {
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= userRating ? "star.fill" : "star")
-                                    .font(.title2)
-                                    .foregroundColor(star <= userRating ? ProfileDesignSystem.Colors.ratingGold : ProfileDesignSystem.Colors.ratingInactive)
-                            }
-                        }
-                        
-                        Text("\(userRating) stars")
-                            .font(ProfileDesignSystem.Typography.captionLarge)
-                            .foregroundColor(ProfileDesignSystem.Colors.textSecondary)
-                            .padding(.leading, ProfileDesignSystem.Spacing.sm)
-                    } else {
-                        Text("Not rated yet")
-                            .font(ProfileDesignSystem.Typography.captionLarge)
-                            .foregroundColor(ProfileDesignSystem.Colors.textSecondary)
-                    }
-                }
+                // Star visualization with partial fill support
+                StarRatingDisplayView(
+                    rating: averageRating,
+                    starSize: 28,
+                    spacing: 6,
+                    showNumber: false
+                )
+                
+                // Total ratings count
+                Text("\(totalRatings) total ratings")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundColor(.secondary)
             }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, ProfileDesignSystem.Spacing.xl)
+            .padding(.horizontal, ProfileDesignSystem.Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: ProfileDesignSystem.CornerRadius.large)
+                    .fill(Color(.secondarySystemGroupedBackground))
+                    .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 2)
+            )
         }
         .padding(ProfileDesignSystem.Spacing.cardPadding)
-        .profileCard()
+        .profileCard(elevation: ProfileDesignSystem.Shadows.medium)
     }
+    
 }
 
 // MARK: - Interactive Rating Component
@@ -341,7 +366,7 @@ struct InteractiveRatingView: View {
                     
                     HStack(spacing: 2) {
                         ForEach(1...5, id: \.self) { star in
-                            Image(systemName: star <= Int(averageRating.rounded()) ? "star.fill" : "star")
+                            Image(systemName: starIconForAverage(position: star, rating: averageRating))
                                 .font(ProfileDesignSystem.Typography.bodyMedium)
                                 .foregroundColor(ProfileDesignSystem.Colors.ratingGold)
                         }
@@ -400,6 +425,119 @@ struct InteractiveRatingView: View {
         .padding(ProfileDesignSystem.Spacing.cardPadding)
         .profileCard()
     }
+    
+    // MARK: - Helper for Half-Star Rendering
+    private func starIconForAverage(position: Int, rating: Double) -> String {
+        let starThreshold = Double(position)
+        let halfStarThreshold = Double(position) - 0.5
+        
+        if rating >= starThreshold {
+            return "star.fill"
+        } else if rating >= halfStarThreshold {
+            return "star.leadinghalf.filled"
+        } else {
+            return "star"
+        }
+    }
+}
+
+// MARK: - Partial Star Rating Component
+
+struct PartialStarRatingView: View {
+    let rating: Double
+    let starSize: CGFloat
+    let spacing: CGFloat
+    let showNumericRating: Bool
+    let numericRatingFont: Font
+    
+    init(
+        rating: Double,
+        starSize: CGFloat = 14,
+        spacing: CGFloat = 2,
+        showNumericRating: Bool = true,
+        numericRatingFont: Font = .caption
+    ) {
+        self.rating = max(0, min(5, rating)) // Clamp between 0 and 5
+        self.starSize = starSize
+        self.spacing = spacing
+        self.showNumericRating = showNumericRating
+        self.numericRatingFont = numericRatingFont
+    }
+    
+    var body: some View {
+        HStack(spacing: 6) {
+            // Numeric rating
+            if showNumericRating {
+                Text(String(format: "%.1f", rating))
+                    .font(numericRatingFont)
+                    .fontWeight(.semibold)
+                    .foregroundColor(ProfileDesignSystem.Colors.ratingGold)
+                    .monospacedDigit()
+            }
+            
+            // Star visualization
+            HStack(spacing: spacing) {
+                ForEach(1...5, id: \.self) { position in
+                    PartialStarView(
+                        position: position,
+                        rating: rating,
+                        size: starSize
+                    )
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Individual Partial Star
+
+private struct PartialStarView: View {
+    let position: Int
+    let rating: Double
+    let size: CGFloat
+    
+    private var fillPercentage: Double {
+        let starStart = Double(position - 1)
+        let starEnd = Double(position)
+        
+        if rating >= starEnd {
+            return 1.0 // Fully filled
+        } else if rating > starStart {
+            return rating - starStart // Partially filled
+        } else {
+            return 0.0 // Empty
+        }
+    }
+    
+    var body: some View {
+        ZStack {
+            // Background (empty star)
+            Image(systemName: "star.fill")
+                .font(.system(size: size))
+                .foregroundColor(ProfileDesignSystem.Colors.ratingInactive)
+            
+            // Foreground (filled portion with gradient mask)
+            Image(systemName: "star.fill")
+                .font(.system(size: size))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            ProfileDesignSystem.Colors.ratingGold,
+                            ProfileDesignSystem.Colors.ratingGold.opacity(0.9)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .mask(
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .frame(width: geometry.size.width * fillPercentage)
+                    }
+                )
+        }
+        .frame(width: size, height: size)
+    }
 }
 
 #Preview {
@@ -417,6 +555,14 @@ struct InteractiveRatingView: View {
             label: "Average",
             color: .orange
         )
+        
+        // Showcase partial star ratings
+        VStack(alignment: .leading, spacing: 12) {
+            PartialStarRatingView(rating: 1.6, starSize: 16)
+            PartialStarRatingView(rating: 3.4, starSize: 16)
+            PartialStarRatingView(rating: 4.5, starSize: 16)
+            PartialStarRatingView(rating: 2.7, starSize: 16)
+        }
         
         InteractiveRatingView(
             userRating: .constant(4),

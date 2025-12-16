@@ -18,7 +18,10 @@ struct EnhancedArtworkView: View {
     
     var body: some View {
         Group {
-            if let url = artworkUrl, let imageUrl = URL(string: url) {
+            // SCREENSHOT MODE: Show placeholder instead of real artwork
+            if ScreenshotModeManager.shared.isScreenshotMode {
+                fallbackPlaceholder
+            } else if let url = artworkUrl, let imageUrl = URL(string: url) {
                 AsyncImage(url: imageUrl) { phase in
                     switch phase {
                     case .empty:

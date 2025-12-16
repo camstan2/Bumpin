@@ -16,6 +16,8 @@ struct MusicSearchResult: Identifiable, Codable {
     // Phase 2: Apple Music genre data
     let genreNames: [String]? // Artist genres from Apple Music
     let primaryGenre: String? // Primary genre classification
+    // Phase 4: Cross-platform tracking
+    let platform: String? // "apple_music" or "spotify"
     
     // Legacy initializer for backward compatibility
     init(id: String, title: String, artistName: String, albumName: String, artworkURL: String?, itemType: String, popularity: Int) {
@@ -28,6 +30,7 @@ struct MusicSearchResult: Identifiable, Codable {
         self.popularity = popularity
         self.genreNames = nil
         self.primaryGenre = nil
+        self.platform = nil
     }
     
     // Enhanced initializer with genre data
@@ -41,6 +44,21 @@ struct MusicSearchResult: Identifiable, Codable {
         self.popularity = popularity
         self.genreNames = genreNames
         self.primaryGenre = primaryGenre
+        self.platform = nil
+    }
+    
+    // Full initializer with platform tracking
+    init(id: String, title: String, artistName: String, albumName: String, artworkURL: String?, itemType: String, popularity: Int, genreNames: [String]?, primaryGenre: String?, platform: String?) {
+        self.id = id
+        self.title = title
+        self.artistName = artistName
+        self.albumName = albumName
+        self.artworkURL = artworkURL
+        self.itemType = itemType
+        self.popularity = popularity
+        self.genreNames = genreNames
+        self.primaryGenre = primaryGenre
+        self.platform = platform
     }
 }
 
@@ -166,29 +184,48 @@ struct LogMusicView: View {
     
     // MARK: - Search Results
     private var searchResultsView: some View {
-        Group {
+        ZStack {
+            // Main content stays in place
+            Group {
+                if searchResults.filteredResults(for: selectedFilter).isEmpty && !searchText.isEmpty {
+                    emptyStateView
+                } else if searchText.isEmpty {
+                    recentSearchesView
+                } else {
+                    resultsListView
+                }
+            }
+            
+            // Loading overlay appears on top without hiding content
             if isLoading {
-                loadingView
-            } else if searchResults.filteredResults(for: selectedFilter).isEmpty && !searchText.isEmpty {
-                emptyStateView
-            } else if searchText.isEmpty {
-                recentSearchesView
-            } else {
-                resultsListView
+                searchingOverlay
+                    .transition(.opacity)
             }
         }
     }
     
-    // MARK: - Loading View
-    private var loadingView: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-                .scaleEffect(1.2)
-            Text("Searching...")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+    // MARK: - Inline Searching Overlay (keeps header and filters visible)
+    private var searchingOverlay: some View {
+        ZStack {
+            // Subtle dim without blocking layout
+            Color.clear
+            HStack(spacing: 10) {
+                ProgressView()
+                    .scaleEffect(1.2)
+                Text("Searching...")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: Color.black.opacity(0.15), radius: 12, y: 6)
+            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
     }
     
     // MARK: - Empty State View
@@ -549,8 +586,9 @@ struct LogSearchResultRow: View {
 struct LogMusicFormView: View {
     let searchResult: MusicSearchResult
     @Environment(\.presentationMode) var presentationMode
-    @State private var rating: Int = 0
+    @State private var rating: Double = 0.0
     @State private var review: String = ""
+    @FocusState private var focusedField: FocusedField?
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var showSuccess = false
@@ -560,6 +598,21 @@ struct LogMusicFormView: View {
     @State private var isPublic = true
     @State private var aiClassification: AIGenreClassificationService.ClassificationResult?
     @State private var isClassifyingGenre = false
+    
+    // Mention state
+    @State private var mentionSuggestions: [MentionSuggestion] = []
+    @State private var showMentionSuggestions = false
+    @State private var currentMentionQuery = ""
+    @State private var mentionStartIndex: String.Index?
+    @State private var tappedInsideReview = false
+
+    // Artist artwork fallback
+    @State private var fetchedArtworkURL: String? = nil
+    @State private var isLoadingArtwork = false
+
+    private enum FocusedField: Hashable {
+        case review
+    }
 
     var body: some View {
         NavigationView {
@@ -567,9 +620,10 @@ struct LogMusicFormView: View {
                 VStack(spacing: 32) {
                     // Header Section - Song/Album Info
                     VStack(spacing: 20) {
-                        // Album artwork with enhanced styling
+                        // Album/Artist artwork with enhanced styling
                         Group {
-                            if let artworkURL = searchResult.artworkURL, let url = URL(string: artworkURL) {
+                            let artworkURL = fetchedArtworkURL ?? searchResult.artworkURL
+                            if let artworkURL = artworkURL, let url = URL(string: artworkURL) {
                                 CachedAsyncImage(url: url) { image in
                                     image
                                         .resizable()
@@ -578,23 +632,29 @@ struct LogMusicFormView: View {
                                     Rectangle()
                                         .fill(Color(.systemGray4))
                                         .overlay(
-                                            Image(systemName: "music.note")
+                                            Image(systemName: searchResult.itemType == "artist" ? "person.wave.2" : "music.note")
                                                 .font(.system(size: 30))
                                                 .foregroundColor(.gray)
                                         )
                                 }
+                            } else if isLoadingArtwork {
+                                Rectangle()
+                                    .fill(Color(.systemGray4))
+                                    .overlay(
+                                        ProgressView()
+                                    )
                             } else {
                                 Rectangle()
                                     .fill(Color(.systemGray4))
                                     .overlay(
-                                        Image(systemName: "music.note")
+                                        Image(systemName: searchResult.itemType == "artist" ? "person.wave.2" : "music.note")
                                             .font(.system(size: 30))
                                             .foregroundColor(.gray)
                                     )
                             }
                         }
                         .frame(width: 140, height: 140)
-                        .cornerRadius(20)
+                        .cornerRadius(searchResult.itemType == "artist" ? 70 : 20)
                         .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
                         
                         VStack(spacing: 8) {
@@ -632,136 +692,7 @@ struct LogMusicFormView: View {
                             .font(.headline)
                             .fontWeight(.semibold)
                         
-                        HStack(spacing: 12) {
-                            ForEach(1...5, id: \.self) { star in
-                                Button(action: {
-                                    withAnimation(.easeInOut(duration: 0.1)) {
-                                        rating = star
-                                    }
-                                }) {
-                                    Image(systemName: star <= rating ? "star.fill" : "star")
-                                        .font(.system(size: 32))
-                                        .foregroundColor(star <= rating ? .yellow : .gray.opacity(0.3))
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                                .scaleEffect(star <= rating ? 1.1 : 1.0)
-                                .animation(.easeInOut(duration: 0.1), value: rating)
-                            }
-                            
-                            Spacer()
-                        }
-                        
-                        if rating > 0 {
-                            Text("\(rating) star\(rating == 1 ? "" : "s")")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .padding(.top, 4)
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    
-                    // Quick Actions Section
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Quick actions")
-                            .font(.headline)
-                            .fontWeight(.semibold)
-                        
-                        HStack(spacing: 20) {
-                            // Like Button
-                            Button(action: {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    isLiked.toggle()
-                                    if isLiked {
-                                        isReposted = false
-                                        thumbsDown = false
-                                    }
-                                }
-                            }) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: isLiked ? "heart.fill" : "heart")
-                                        .font(.system(size: 18, weight: .medium))
-                                    Text("Like")
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                }
-                                .foregroundColor(isLiked ? .red : .primary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .fill(isLiked ? Color.red.opacity(0.1) : Color(.systemGray6))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .stroke(isLiked ? Color.red.opacity(0.3) : Color.clear, lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            // Repost Button
-                            Button(action: {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    isReposted.toggle()
-                                    if isReposted {
-                                        isLiked = false
-                                        thumbsDown = false
-                                    }
-                                }
-                            }) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: isReposted ? "arrow.2.squarepath" : "arrow.2.squarepath")
-                                        .font(.system(size: 18, weight: .medium))
-                                    Text("Repost")
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                }
-                                .foregroundColor(isReposted ? .blue : .primary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .fill(isReposted ? Color.blue.opacity(0.1) : Color(.systemGray6))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .stroke(isReposted ? Color.blue.opacity(0.3) : Color.clear, lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            // Skip Button
-                            Button(action: {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    thumbsDown.toggle()
-                                    if thumbsDown {
-                                        isLiked = false
-                                        isReposted = false
-                                    }
-                                }
-                            }) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: thumbsDown ? "hand.thumbsdown.fill" : "hand.thumbsdown")
-                                        .font(.system(size: 18, weight: .medium))
-                                    Text("Skip")
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                }
-                                .foregroundColor(thumbsDown ? .orange : .primary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .fill(thumbsDown ? Color.orange.opacity(0.1) : Color(.systemGray6))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .stroke(thumbsDown ? Color.orange.opacity(0.3) : Color.clear, lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            Spacer()
-                        }
+                        PreciseStarRatingView(rating: $rating)
                     }
                     .padding(.horizontal, 20)
                     
@@ -771,15 +702,88 @@ struct LogMusicFormView: View {
                             .font(.headline)
                             .fontWeight(.semibold)
                         
-                        TextEditor(text: $review)
-                            .frame(minHeight: 120)
-                            .padding(16)
-                            .background(Color(.systemGray6))
-                            .cornerRadius(16)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                            )
+                        VStack(spacing: 0) {
+                            // Mention suggestions
+                            if showMentionSuggestions && !mentionSuggestions.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 12) {
+                                        ForEach(mentionSuggestions) { suggestion in
+                                            Button(action: {
+                                                insertMention(suggestion)
+                                            }) {
+                                                HStack(spacing: 8) {
+                                                    // Profile picture
+                                                    if let profileUrl = suggestion.profilePictureUrl, let url = URL(string: profileUrl) {
+                                                        CachedAsyncImage(url: url) { image in
+                                                            image
+                                                                .resizable()
+                                                                .aspectRatio(contentMode: .fill)
+                                                        } placeholder: {
+                                                            Circle()
+                                                                .fill(Color.purple.opacity(0.2))
+                                                        }
+                                                        .frame(width: 32, height: 32)
+                                                        .clipShape(Circle())
+                                                    } else {
+                                                        Circle()
+                                                            .fill(Color.purple.opacity(0.2))
+                                                            .frame(width: 32, height: 32)
+                                                            .overlay(
+                                                                Text(String(suggestion.username.prefix(1)).uppercased())
+                                                                    .font(.caption)
+                                                                    .foregroundColor(.purple)
+                                                            )
+                                                    }
+                                                    
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        Text(suggestion.username)
+                                                            .font(.subheadline)
+                                                            .fontWeight(.semibold)
+                                                            .foregroundColor(.primary)
+                                                        
+                                                        if suggestion.displayName != suggestion.username {
+                                                            Text(suggestion.displayName)
+                                                                .font(.caption2)
+                                                                .foregroundColor(.secondary)
+                                                        }
+                                                    }
+                                                }
+                                                .padding(.vertical, 8)
+                                                .padding(.horizontal, 12)
+                                                .background(Color(.systemGray6))
+                                                .cornerRadius(12)
+                                            }
+                                        }
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                }
+                                .background(Color(.systemBackground))
+                                .cornerRadius(16)
+                                .padding(.bottom, 8)
+                            }
+                            
+                            // Text editor
+                            TextEditor(text: $review)
+                                .frame(minHeight: 120)
+                                .padding(16)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(16)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                                )
+                                .focused($focusedField, equals: .review)
+                                .onChange(of: review) { oldValue, newValue in
+                                    handleTextChange(newValue)
+                                }
+                                .simultaneousGesture(
+                                    TapGesture()
+                                        .onEnded {
+                                            tappedInsideReview = true
+                                        }
+                                )
+                        }
                     }
                     .padding(.horizontal, 20)
                     
@@ -860,6 +864,18 @@ struct LogMusicFormView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(
+                TapGesture()
+                    .onEnded {
+                        if tappedInsideReview {
+                            tappedInsideReview = false
+                        } else {
+                            focusedField = nil
+                            hideKeyboard()
+                            showMentionSuggestions = false
+                        }
+                    }
+            )
             .navigationTitle("Log Music")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -886,6 +902,13 @@ struct LogMusicFormView: View {
             Task {
                 await classifyGenre()
             }
+            
+            // Fetch artist artwork if missing
+            if searchResult.itemType == "artist" && searchResult.artworkURL == nil {
+                Task {
+                    await fetchArtistArtwork()
+                }
+            }
         }
     }
     
@@ -911,70 +934,24 @@ struct LogMusicFormView: View {
                 .background(Color(.systemGray6))
                 .cornerRadius(12)
             } else if let classification = aiClassification {
-                VStack(alignment: .leading, spacing: 12) {
-                    // Primary genre display
-                    HStack(spacing: 12) {
-                        Image(systemName: "music.note.list")
+                HStack(spacing: 16) {
+                    // Genre icon
+                    Image(systemName: genreIcon(for: classification.primaryGenre))
+                        .font(.system(size: 28))
                             .foregroundColor(.purple)
-                            .font(.title2)
-                        
-                        VStack(alignment: .leading, spacing: 2) {
+                        .frame(width: 50, height: 50)
+                        .background(
+                            Circle()
+                                .fill(Color.purple.opacity(0.1))
+                        )
+                    
+                    // Genre name
                             Text(classification.primaryGenre)
                                 .font(.title3)
                                 .fontWeight(.semibold)
                                 .foregroundColor(.purple)
-                            
-                            Text("Primary Genre")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
                         
                         Spacer()
-                        
-                        // Confidence indicator
-                        VStack(alignment: .trailing, spacing: 2) {
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(confidenceColor(classification.confidence))
-                                    .frame(width: 8, height: 8)
-                                Text("\(Int(classification.confidence * 100))%")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(confidenceColor(classification.confidence))
-                            }
-                            
-                            Text("Confidence")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    
-                    // Apple Music genres (if available)
-                    if !classification.appleMusicGenres.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Apple Music Genres:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            Text(classification.appleMusicGenres.joined(separator: ", "))
-                                .font(.caption)
-                                .foregroundColor(.primary)
-                        }
-                    }
-                    
-                    // AI reasoning (if available)
-                    if let reasoning = classification.reasoning {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("AI Reasoning:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            Text(reasoning)
-                                .font(.caption)
-                                .foregroundColor(.primary)
-                                .italic()
-                        }
-                    }
                 }
                 .padding()
                 .background(Color(.systemGray6))
@@ -1000,6 +977,145 @@ struct LogMusicFormView: View {
             }
         }
         .padding(.horizontal, 20)
+    }
+    
+    // MARK: - Genre Icon Mapping
+    
+    private func genreIcon(for genre: String) -> String {
+        let lowercasedGenre = genre.lowercased()
+        
+        // Hip-Hop & Rap
+        if lowercasedGenre.contains("hip") || lowercasedGenre.contains("hop") || lowercasedGenre.contains("rap") {
+            return "speaker.wave.3.fill"
+        }
+        // Rock
+        else if lowercasedGenre.contains("rock") {
+            return "guitars.fill"
+        }
+        // Pop
+        else if lowercasedGenre.contains("pop") {
+            return "star.circle.fill"
+        }
+        // Electronic / EDM
+        else if lowercasedGenre.contains("electronic") || lowercasedGenre.contains("edm") || 
+                lowercasedGenre.contains("house") || lowercasedGenre.contains("techno") ||
+                lowercasedGenre.contains("dubstep") || lowercasedGenre.contains("trance") {
+            return "waveform"
+        }
+        // Jazz
+        else if lowercasedGenre.contains("jazz") {
+            return "music.mic"
+        }
+        // Classical
+        else if lowercasedGenre.contains("classical") || lowercasedGenre.contains("orchestra") {
+            return "music.quarternote.3"
+        }
+        // Country
+        else if lowercasedGenre.contains("country") {
+            return "figure.walk"
+        }
+        // R&B / Soul
+        else if lowercasedGenre.contains("r&b") || lowercasedGenre.contains("soul") || 
+                lowercasedGenre.contains("rnb") {
+            return "heart.text.square.fill"
+        }
+        // Blues
+        else if lowercasedGenre.contains("blues") {
+            return "music.note"
+        }
+        // Reggae
+        else if lowercasedGenre.contains("reggae") || lowercasedGenre.contains("ska") {
+            return "sun.max.fill"
+        }
+        // Metal
+        else if lowercasedGenre.contains("metal") {
+            return "bolt.fill"
+        }
+        // Punk
+        else if lowercasedGenre.contains("punk") {
+            return "flame.fill"
+        }
+        // Latin
+        else if lowercasedGenre.contains("latin") || lowercasedGenre.contains("salsa") || 
+                lowercasedGenre.contains("reggaeton") {
+            return "globe.americas.fill"
+        }
+        // Indie / Alternative
+        else if lowercasedGenre.contains("indie") || lowercasedGenre.contains("alternative") {
+            return "sparkles"
+        }
+        // Folk
+        else if lowercasedGenre.contains("folk") || lowercasedGenre.contains("acoustic") {
+            return "leaf.fill"
+        }
+        // Ambient / Chillout
+        else if lowercasedGenre.contains("ambient") || lowercasedGenre.contains("chill") {
+            return "cloud.fill"
+        }
+        // Gospel / Worship
+        else if lowercasedGenre.contains("gospel") || lowercasedGenre.contains("worship") ||
+                lowercasedGenre.contains("christian") {
+            return "hands.sparkles.fill"
+        }
+        // K-Pop / J-Pop / Asian
+        else if lowercasedGenre.contains("k-pop") || lowercasedGenre.contains("j-pop") ||
+                lowercasedGenre.contains("cpop") {
+            return "globe.asia.australia.fill"
+        }
+        // Funk / Disco
+        else if lowercasedGenre.contains("funk") || lowercasedGenre.contains("disco") {
+            return "figure.dance"
+        }
+        // World Music
+        else if lowercasedGenre.contains("world") || lowercasedGenre.contains("african") ||
+                lowercasedGenre.contains("middle east") {
+            return "globe"
+        }
+        // Default
+        else {
+            return "music.note.list"
+        }
+    }
+    
+    // MARK: - Artist Artwork Fetching
+    
+    private func fetchArtistArtwork() async {
+        guard searchResult.itemType == "artist" else { return }
+        
+        await MainActor.run {
+            isLoadingArtwork = true
+        }
+        
+        do {
+            // Search for the artist using MusicKit
+            var request = MusicCatalogSearchRequest(term: searchResult.artistName, types: [MusicKit.Artist.self])
+            request.limit = 5
+            
+            let response = try await request.response()
+            
+            // Find the best matching artist
+            let artist = response.artists.first { artist in
+                artist.name.lowercased() == searchResult.artistName.lowercased()
+            } ?? response.artists.first
+            
+            if let artist = artist, let artworkURL = artist.artwork?.url(width: 512, height: 512)?.absoluteString {
+                await MainActor.run {
+                    fetchedArtworkURL = artworkURL
+                    isLoadingArtwork = false
+                }
+                print("✅ Fetched artist artwork for \(searchResult.artistName): \(artworkURL)")
+            } else {
+                await MainActor.run {
+                    isLoadingArtwork = false
+                }
+                print("⚠️ No artwork found for artist: \(searchResult.artistName)")
+            }
+        } catch {
+            print("❌ Error fetching artist artwork: \(error.localizedDescription)")
+            await MainActor.run {
+                isLoadingArtwork = false
+            }
+        }
     }
     
     // MARK: - Genre Classification Methods
@@ -1050,6 +1166,80 @@ struct LogMusicFormView: View {
         }
     }
 
+    // MARK: - Mention Handling
+    
+    private func handleTextChange(_ newValue: String) {
+        // Detect if user is typing a mention
+        if let lastAtIndex = newValue.lastIndex(of: "@") {
+            // Check if @ is at the start or preceded by a space
+            let isValidMention: Bool
+            if lastAtIndex == newValue.startIndex {
+                isValidMention = true
+            } else {
+                let charBeforeAt = newValue[newValue.index(before: lastAtIndex)]
+                isValidMention = charBeforeAt.isWhitespace
+            }
+            
+            if isValidMention {
+                // Extract the query after @
+                let afterAtIndex = newValue.index(after: lastAtIndex)
+                let afterAt = String(newValue[afterAtIndex...])
+                
+                // Check if there's a space after @ (if so, stop suggesting)
+                if let spaceIndex = afterAt.firstIndex(of: " ") {
+                    let query = String(afterAt[..<spaceIndex])
+                    if query.isEmpty {
+                        showMentionSuggestions = false
+                        mentionSuggestions = []
+                    }
+                } else {
+                    // Continue suggesting
+                    currentMentionQuery = afterAt
+                    mentionStartIndex = lastAtIndex
+                    showMentionSuggestions = true
+                    fetchMentionSuggestions(query: afterAt)
+                }
+            } else {
+                showMentionSuggestions = false
+            }
+        } else {
+            // No @ found, hide suggestions
+            showMentionSuggestions = false
+            mentionSuggestions = []
+        }
+    }
+    
+    private func fetchMentionSuggestions(query: String) {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        Task {
+            let suggestions = await MentionService.shared.getSuggestions(
+                query: query,
+                logId: nil, // No log ID yet since we're creating a new log
+                currentUserId: currentUserId
+            )
+            
+            await MainActor.run {
+                mentionSuggestions = suggestions
+            }
+        }
+    }
+    
+    private func insertMention(_ suggestion: MentionSuggestion) {
+        guard let startIndex = mentionStartIndex else { return }
+        
+        // Replace from @ to current position with @username
+        let beforeAt = String(review[..<startIndex])
+        let mentionText = "@\(suggestion.username) "
+        
+        review = beforeAt + mentionText
+        
+        // Hide suggestions
+        showMentionSuggestions = false
+        mentionSuggestions = []
+        mentionStartIndex = nil
+    }
+    
     func saveLog() {
         isSaving = true
         errorMessage = nil
@@ -1089,10 +1279,16 @@ struct LogMusicFormView: View {
         // Get or create universal track for cross-platform unification
         let universalTrackId = await UnifiedMusicSearchService.shared.createUniversalTrackForLog(
             searchResult: searchResult,
-            platform: "apple_music" // TODO: Detect actual platform from search source
+            platform: searchResult.platform ?? "apple_music" // Use actual platform from search result
         )
         
         await MainActor.run {
+            // Create genres array with primaryGenre for Firestore querying
+            let genresArray: [String] = [classification.primaryGenre]
+            
+            // Use fetched artwork if available, otherwise use original
+            let finalArtworkURL = fetchedArtworkURL ?? searchResult.artworkURL
+            
             let log = MusicLog(
                 id: UUID().uuidString,
                 userId: userId,
@@ -1100,9 +1296,9 @@ struct LogMusicFormView: View {
                 itemType: searchResult.itemType,
                 title: searchResult.title,
                 artistName: searchResult.artistName,
-                artworkUrl: searchResult.artworkURL,
+                artworkUrl: finalArtworkURL,
                 dateLogged: Date(),
-                rating: rating == 0 ? nil : rating,
+                rating: rating < 1.0 ? nil : rating,
                 review: review.isEmpty ? nil : review,
                 notes: nil,
                 commentCount: nil,
@@ -1115,11 +1311,12 @@ struct LogMusicFormView: View {
                 isPublic: isPublic,
                 appleMusicGenres: classification.appleMusicGenres,
                 primaryGenre: classification.primaryGenre,
+                genres: genresArray,
                 userCorrectedGenre: nil,
                 genreConfidenceScore: classification.confidence,
                 classificationMethod: classification.classificationMethod,
                 universalTrackId: universalTrackId,
-                musicPlatform: "apple_music",
+                musicPlatform: searchResult.platform ?? "apple_music",
                 platformMatchingConfidence: 1.0
             )
             
@@ -1135,6 +1332,31 @@ struct LogMusicFormView: View {
                         print("✅ Log saved successfully with content moderation and AI genre classification!")
                         self.showSuccess = true
                         self.errorMessage = nil
+                        
+                        // Send mention notifications if review contains @mentions
+                        if !self.review.isEmpty {
+                            Task {
+                                // Get user profile for username
+                                let db = Firestore.firestore()
+                                if let userDoc = try? await db.collection("users").document(userId).getDocument(),
+                                   let username = userDoc.data()?["username"] as? String {
+                                    let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+                                    
+                                    await MentionService.shared.sendMentionNotifications(
+                                        text: self.review,
+                                        contentType: "log_caption",
+                                        contentId: log.id,
+                                        logId: log.id,
+                                        logTitle: log.title,
+                                        logArtist: log.artistName,
+                                        mentionerUserId: userId,
+                                        mentionerUsername: username,
+                                        mentionerProfilePicture: profilePictureUrl
+                                    )
+                                }
+                            }
+                        }
+                        
                         // Show success message briefly before dismissing
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             self.presentationMode.wrappedValue.dismiss()

@@ -47,7 +47,7 @@ enum MockSocialData {
         for i in 0..<max(1, count) {
             let user = users[i % users.count]
             let song = songs[i % songs.count]
-            let rating: Int? = [nil, 3, 4, 5][i % 4]
+            let rating: Double? = [nil, 3.0, 4.0, 5.0][i % 4]
             out.append(FriendActivity(userId: user.0, username: user.1, userProfilePictureUrl: nil, songTitle: song.0, artistName: song.1, artworkUrl: nil, rating: rating, loggedAt: Date().addingTimeInterval(-Double(i) * 3600), musicLog: nil))
         }
         return out
@@ -121,7 +121,7 @@ enum MockSocialData {
             let title = isArtist ? artists[i % artists.count] : "Title \(i)"
             let artistName = artists[i % artists.count]
             let date = Date().addingTimeInterval(-Double(i) * 7200)
-            let rating: Int? = [nil, 3, 4, 5][i % 4]
+            let rating: Double? = [nil, 3.0, 4.0, 5.0][i % 4]
             let review: String? = (i % 3 == 0) ? "Loving this one." : nil
             let commentCount = i % 5
             let helpfulCount = 1 + (i % 7)

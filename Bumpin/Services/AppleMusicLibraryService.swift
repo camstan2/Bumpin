@@ -158,14 +158,17 @@ class AppleMusicLibraryService: ObservableObject {
                           let artist = item.artist,
                           !title.isEmpty else { return nil }
                     
+                    let appleMusicId = !item.playbackStoreID.isEmpty ? item.playbackStoreID : nil
+                    
                     return LibraryItem(
-                        id: String(item.persistentID),
+                        id: appleMusicId ?? String(item.persistentID),
                         title: title,
                         artistName: artist,
                         albumName: item.albumTitle,
                         artworkURL: self.extractArtworkURL(from: item),
                         itemType: .song,
-                        dateAdded: item.dateAdded
+                        dateAdded: item.dateAdded,
+                        platform: "apple_music"
                     )
                 }
                 
@@ -227,7 +230,8 @@ class AppleMusicLibraryService: ObservableObject {
                         albumName: albumTitle,
                         artworkURL: self.extractArtworkURL(from: representativeItem),
                         itemType: .album,
-                        dateAdded: entry.dateAdded
+                        dateAdded: entry.dateAdded,
+                        platform: "apple_music"
                     )
                 }
                 
@@ -287,7 +291,8 @@ class AppleMusicLibraryService: ObservableObject {
                         albumName: nil,
                         artworkURL: self.extractArtworkURL(from: representativeItem),
                         itemType: .artist,
-                        dateAdded: entry.dateAdded
+                        dateAdded: entry.dateAdded,
+                        platform: "apple_music"
                     )
                 }
                 
@@ -667,7 +672,9 @@ class AppleMusicLibraryService: ObservableObject {
                     artistName: song.artistName,
                     albumName: song.albumTitle,
                     artworkURL: song.artwork?.url(width: 300, height: 300)?.absoluteString,
-                    itemType: .song
+                    itemType: .song,
+                    dateAdded: nil,
+                    platform: "apple_music"
                 )
             }
             
@@ -702,13 +709,16 @@ class AppleMusicLibraryService: ObservableObject {
                           let artist = item.artist,
                           !title.isEmpty else { return nil }
                     
+                    let appleMusicId = !item.playbackStoreID.isEmpty ? item.playbackStoreID : nil
+                    
                     return LibraryItem(
-                        id: String(item.persistentID),
+                        id: appleMusicId ?? String(item.persistentID),
                         title: title,
                         artistName: artist,
                         albumName: item.albumTitle,
                         artworkURL: self.extractArtworkURL(from: item),
-                        itemType: .song
+                        itemType: .song,
+                        platform: "apple_music"
                     )
                 }
                 
@@ -731,7 +741,8 @@ class AppleMusicLibraryService: ObservableObject {
                     artistName: artist.name,
                     albumName: nil,
                     artworkURL: artist.artwork?.url(width: 300, height: 300)?.absoluteString,
-                    itemType: .artist
+                    itemType: .artist,
+                    platform: "apple_music"
                 )
             }
             
@@ -769,7 +780,8 @@ class AppleMusicLibraryService: ObservableObject {
                         artistName: artist,
                         albumName: nil,
                         artworkURL: self.extractArtworkURL(from: collection.representativeItem),
-                        itemType: .artist
+                        itemType: .artist,
+                        platform: "apple_music"
                     )
                 }
                 
@@ -798,7 +810,8 @@ class AppleMusicLibraryService: ObservableObject {
                     artistName: album.artistName,
                     albumName: album.title,
                     artworkURL: album.artwork?.url(width: 300, height: 300)?.absoluteString,
-                    itemType: .album
+                    itemType: .album,
+                    platform: "apple_music"
                 )
             }
             
@@ -837,7 +850,8 @@ class AppleMusicLibraryService: ObservableObject {
                         artistName: artist,
                         albumName: album,
                         artworkURL: self.extractArtworkURL(from: collection.representativeItem),
-                        itemType: .album
+                        itemType: .album,
+                        platform: "apple_music"
                     )
                 }
                 
@@ -878,7 +892,8 @@ class AppleMusicLibraryService: ObservableObject {
                     artistName: song.artistName,
                     albumName: song.albumTitle,
                     artworkURL: song.artwork?.url(width: 300, height: 300)?.absoluteString,
-                    itemType: .song
+                    itemType: .song,
+                    platform: "apple_music"
                 )
             })
             
@@ -890,7 +905,8 @@ class AppleMusicLibraryService: ObservableObject {
                     artistName: artist.name,
                     albumName: nil,
                     artworkURL: artist.artwork?.url(width: 300, height: 300)?.absoluteString,
-                    itemType: .artist
+                    itemType: .artist,
+                    platform: "apple_music"
                 )
             })
             
@@ -902,7 +918,8 @@ class AppleMusicLibraryService: ObservableObject {
                     artistName: album.artistName,
                     albumName: album.title,
                     artworkURL: album.artwork?.url(width: 300, height: 300)?.absoluteString,
-                    itemType: .album
+                    itemType: .album,
+                    platform: "apple_music"
                 )
             })
             
@@ -1049,7 +1066,8 @@ class AppleMusicLibraryService: ObservableObject {
                         artistName: track.artistName,
                         albumName: track.albumTitle ?? "",
                         artworkURL: track.artwork?.url(width: 300, height: 300)?.absoluteString,
-                        itemType: .song
+                        itemType: .song,
+                        platform: "apple_music"
                     )
                 }
                 print("🎵 Returning \(songs.count) tracks from playlist.tracks")
@@ -1069,7 +1087,8 @@ class AppleMusicLibraryService: ObservableObject {
                         artistName: track.artistName,
                         albumName: track.albumTitle ?? "",
                         artworkURL: track.artwork?.url(width: 300, height: 300)?.absoluteString,
-                        itemType: .song
+                        itemType: .song,
+                        platform: "apple_music"
                     )
                 }
                 print("🎵 Returning \(songs.count) tracks from detailed playlist")
@@ -1109,13 +1128,16 @@ class AppleMusicLibraryService: ObservableObject {
                     guard let title = item.title,
                           let artist = item.artist else { return nil }
                     
+                    let appleMusicId = !item.playbackStoreID.isEmpty ? item.playbackStoreID : nil
+                    
                     return LibraryItem(
-                        id: String(item.persistentID),
+                        id: appleMusicId ?? String(item.persistentID),
                         title: title,
                         artistName: artist,
                         albumName: item.albumTitle,
                         artworkURL: self.extractArtworkURL(from: item),
-                        itemType: .song
+                        itemType: .song,
+                        platform: "apple_music"
                     )
                 }
                 

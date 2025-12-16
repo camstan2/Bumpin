@@ -114,13 +114,12 @@ struct SocialScoreDisplayView: View {
                                     .foregroundColor(scoreColor(for: score.overallScore))
                                 
                                 VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 2) {
-                                        ForEach(0..<5, id: \.self) { index in
-                                            Image(systemName: index < Int(score.overallScore / 2) ? "star.fill" : "star")
-                                                .font(.caption2)
-                                                .foregroundColor(ProfileDesignSystem.Colors.ratingActive)
-                                        }
-                                    }
+                                    StarRatingDisplayView(
+                                        rating: score.overallScore / 2,
+                                        starSize: 10,
+                                        spacing: 1,
+                                        showNumber: false
+                                    )
                                     
                                     Text("\(score.totalRatings) ratings")
                                         .font(ProfileDesignSystem.Typography.captionMedium)

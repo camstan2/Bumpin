@@ -346,6 +346,16 @@ class DailyPromptCoordinator: ObservableObject {
         return promptService.canUserRespond
     }
     
+    /// Whether the current prompt is still loading from Firestore
+    var isPromptLoading: Bool {
+        return isInitializing || promptService.isLoadingPrompt
+    }
+    
+    /// Whether we're determining if the user has already responded
+    var isUserResponseLoading: Bool {
+        return promptService.isLoadingResponse
+    }
+    
     /// User has already responded to current prompt
     var hasRespondedToCurrentPrompt: Bool {
         return promptService.hasUserResponded

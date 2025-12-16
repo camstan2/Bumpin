@@ -36,16 +36,35 @@ final class PopularityService {
             do {
                 // Compute popularity from logs within 30 days
                 let monthAgo = Calendar.current.date(byAdding: .day, value: -30, to: now) ?? now
+                
+                // 🎯 Phase 3: Query by universalTrackId for cross-platform aggregation
+                // First, try to query by universalTrackId
                 let snap = try await db.collection("logs")
-                    .whereField("itemId", in: batch)
+                    .whereField("universalTrackId", in: batch)
                     .whereField("dateLogged", isGreaterThan: monthAgo)
                     .getDocuments()
+                
                 var byItem: [String: [MusicLog]] = [:]
                 for doc in snap.documents {
                     if let log = try? doc.data(as: MusicLog.self) {
+                        let key = log.universalTrackId ?? log.itemId
+                        byItem[key, default: []].append(log)
+                    }
+                }
+                
+                // Fallback: query by itemId for backwards compatibility
+                let fallbackSnap = try await db.collection("logs")
+                    .whereField("itemId", in: batch)
+                    .whereField("dateLogged", isGreaterThan: monthAgo)
+                    .getDocuments()
+                
+                for doc in fallbackSnap.documents {
+                    if let log = try? doc.data(as: MusicLog.self),
+                       log.universalTrackId == nil { // Only include if not already in byItem
                         byItem[log.itemId, default: []].append(log)
                     }
                 }
+                
                 for id in batch {
                     let logs = byItem[id] ?? []
                     let count = logs.count
@@ -56,9 +75,12 @@ final class PopularityService {
                     let pop = ItemPopularity(score: score, logsCount30d: count, avgRating: avg, lastUpdated: now)
                     cache[id] = pop
                     lastFetchAt[id] = now
+                    
+                    print("📊 Popularity: \(id) - \(count) logs, avg: \(String(format: "%.1f", avg)), score: \(String(format: "%.1f", score))")
                 }
             } catch {
                 // Ignore failures; keep existing cache
+                print("❌ PopularityService error: \(error.localizedDescription)")
                 continue
             }
         }
@@ -73,15 +95,12 @@ extension PopularityService {
         let cfg = ScoringConfig.shared
         let now = Date()
         let countScore = Double(logs.count) * cfg.helpfulWeight
-        let rated = logs.compactMap { $0.rating }
-        let avg = rated.isEmpty ? 0.0 : Double(rated.reduce(0, +)) / Double(rated.count)
-        let ratingScore = avg * cfg.ratingWeight
         let recencySum = logs.reduce(0.0) { acc, log in
             let hours = now.timeIntervalSince(log.dateLogged) / 3600.0
             return acc + exp(-hours / cfg.decayHours)
         }
         let recencyScore = recencySum * cfg.decayWeight
-        return countScore + ratingScore + recencyScore
+        return countScore + recencyScore
     }
 }
 

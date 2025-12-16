@@ -88,8 +88,8 @@ class ArtistProfileViewModel: ObservableObject {
     @Published var albumsLoadingState: LoadingState = .idle
     
     // Display control
-    @Published var displayedSongsCount: Int = 8
-    @Published var displayedAlbumsCount: Int = 8
+    @Published var displayedSongsCount: Int = 25  // OPTIMIZED: Reduced from 8 to 25 for better initial load
+    @Published var displayedAlbumsCount: Int = 25  // OPTIMIZED: Reduced from 8 to 25 for better initial load
     @Published var showAllSongs: Bool = false
     @Published var showAllAlbums: Bool = false
     
@@ -105,8 +105,8 @@ class ArtistProfileViewModel: ObservableObject {
     private let db = Firestore.firestore()
     
     // Pagination
-    private var songsPageSize: Int = 16
-    private var albumsPageSize: Int = 16
+    private var songsPageSize: Int = 25  // OPTIMIZED: Increased from 16 to 25 for smoother pagination
+    private var albumsPageSize: Int = 25  // OPTIMIZED: Increased from 16 to 25 for smoother pagination
     private var hasMoreSongs: Bool = true
     private var hasMoreAlbums: Bool = true
     
@@ -265,9 +265,9 @@ class ArtistProfileViewModel: ObservableObject {
         // Clear cache and reload
         await cacheManager.clearCacheForArtist(artistName)
         
-        // Reset display counts
-        displayedSongsCount = 8
-        displayedAlbumsCount = 8
+        // Reset display counts to optimized initial values
+        displayedSongsCount = 25  // OPTIMIZED: Reset to 25 instead of 8
+        displayedAlbumsCount = 25  // OPTIMIZED: Reset to 25 instead of 8
         showAllSongs = false
         showAllAlbums = false
         hasMoreSongs = true
@@ -455,12 +455,12 @@ class ArtistProfileViewModel: ObservableObject {
     
     func optimizeForLowMemoryDevice() {
         // Reduce pagination sizes for low-memory devices
-        songsPageSize = 8
-        albumsPageSize = 8
+        songsPageSize = 15  // OPTIMIZED: Adjusted for low-memory devices
+        albumsPageSize = 15  // OPTIMIZED: Adjusted for low-memory devices
         
         // Limit display counts
-        displayedSongsCount = min(displayedSongsCount, 16)
-        displayedAlbumsCount = min(displayedAlbumsCount, 16)
+        displayedSongsCount = min(displayedSongsCount, 25)
+        displayedAlbumsCount = min(displayedAlbumsCount, 25)
         
         print("🔧 Optimized for low-memory device - reduced pagination sizes")
     }
@@ -524,8 +524,8 @@ class ArtistProfileViewModel: ObservableObject {
     
     func updateSongsTimeFilter(_ filter: TimeFilter) {
         songsTimeFilter = filter
-        // Reset display count when filter changes
-        displayedSongsCount = 8
+        // Reset display count when filter changes to optimized initial value
+        displayedSongsCount = 25  // OPTIMIZED: Reset to 25 instead of 8
         
         // Track filter usage
         AnalyticsService.shared.logFilterUsage(
@@ -537,8 +537,8 @@ class ArtistProfileViewModel: ObservableObject {
     
     func updateAlbumsFilter(_ filter: AlbumFilter) {
         albumsFilter = filter
-        // Reset display count when filter changes
-        displayedAlbumsCount = 8
+        // Reset display count when filter changes to optimized initial value
+        displayedAlbumsCount = 25  // OPTIMIZED: Reset to 25 instead of 8
         
         // Track filter usage
         AnalyticsService.shared.logFilterUsage(
@@ -554,7 +554,7 @@ class ArtistProfileViewModel: ObservableObject {
         if showAllSongs {
             displayedSongsCount = filteredSongs.count
         } else {
-            displayedSongsCount = 8
+            displayedSongsCount = 25  // OPTIMIZED: Reset to 25 instead of 8
         }
         
         AnalyticsService.shared.logSectionExpansion(
@@ -571,7 +571,7 @@ class ArtistProfileViewModel: ObservableObject {
         if showAllAlbums {
             displayedAlbumsCount = filteredAlbums.count
         } else {
-            displayedAlbumsCount = 8
+            displayedAlbumsCount = 25  // OPTIMIZED: Reset to 25 instead of 8
         }
         
         AnalyticsService.shared.logSectionExpansion(
@@ -670,24 +670,32 @@ class ArtistProfileViewModel: ObservableObject {
     }
     
     private func loadFromAppleMusic() async throws {
-        // Search for the artist first with enhanced search
+        // STAGE 1: Load artist info and artwork (FASTEST - shows header immediately)
+        print("📍 STAGE 1: Loading artist info...")
+        let stage1Start = CFAbsoluteTimeGetCurrent()
+        
         var artistRequest = MusicCatalogSearchRequest(term: artistName, types: [MusicKit.Artist.self])
         artistRequest.limit = 5 // Get multiple matches to find best one
         
         let artistResponse = try await artistRequest.response()
         
-        // Find the best matching artist (exact name match preferred)
         guard let artist = findBestArtistMatch(from: artistResponse.artists) else {
             throw ArtistProfileError.artistNotFound
         }
         
-        // Update artist artwork with high-resolution image
+        // Update artist artwork immediately (UI can show header now)
         artistData = ArtistProfileData(
             artistName: artistName,
             artworkURL: artist.artwork?.url(width: 512, height: 512)?.absoluteString
         )
         
-        // Load comprehensive catalog data concurrently
+        let stage1Time = CFAbsoluteTimeGetCurrent() - stage1Start
+        print("✅ STAGE 1 complete in \(String(format: "%.2f", stage1Time))s - Header ready")
+        
+        // STAGE 2: Load catalog data in parallel (songs + albums together)
+        print("📍 STAGE 2: Loading songs & albums in parallel...")
+        let stage2Start = CFAbsoluteTimeGetCurrent()
+        
         async let songsTask = loadComprehensiveSongsFromAppleMusic(for: artist)
         async let albumsTask = loadComprehensiveAlbumsFromAppleMusic(for: artist)
         
@@ -696,8 +704,15 @@ class ArtistProfileViewModel: ObservableObject {
         artistData.allSongs = songs
         artistData.allAlbums = albums
         
-        // Load ratings with intelligent batching
-        await loadRatingsWithBatching()
+        let stage2Time = CFAbsoluteTimeGetCurrent() - stage2Start
+        print("✅ STAGE 2 complete in \(String(format: "%.2f", stage2Time))s - Catalog ready (\(songs.count) songs, \(albums.count) albums)")
+        
+        // STAGE 3: Load ratings in background (UI already showing catalog)
+        print("📍 STAGE 3: Loading ratings in background...")
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.loadRatingsWithBatching()
+            print("✅ STAGE 3 complete - Ratings loaded")
+        }
     }
     
     private func findBestArtistMatch(from artists: MusicItemCollection<MusicKit.Artist>) -> MusicKit.Artist? {
@@ -724,50 +739,61 @@ class ArtistProfileViewModel: ObservableObject {
     private func loadComprehensiveSongsFromAppleMusic(for artist: MusicKit.Artist) async throws -> [ArtistCatalogItem] {
         var allSongs: [ArtistCatalogItem] = []
         
-        // Strategy 1: Direct artist songs search
-        do {
-            var songsRequest = MusicCatalogSearchRequest(term: "\(artist.name) songs", types: [MusicKit.Song.self])
-            songsRequest.limit = 50
+        // OPTIMIZATION: Use TaskGroup for parallel API calls instead of sequential
+        await withTaskGroup(of: [ArtistCatalogItem].self) { group in
             
-            let songsResponse = try await songsRequest.response()
-            let directSongs = songsResponse.songs.filter { song in
-                isExactArtistMatch(song.artistName, targetArtist: artist.name)
+            // Task 1: Direct artist songs search
+            group.addTask {
+                do {
+                    var songsRequest = MusicCatalogSearchRequest(term: "\(artist.name) songs", types: [MusicKit.Song.self])
+                    songsRequest.limit = 50
+                    
+                    let songsResponse = try await songsRequest.response()
+                    let directSongs = songsResponse.songs.filter { song in
+                        self.isExactArtistMatch(song.artistName, targetArtist: artist.name)
+                    }
+                    
+                    return directSongs.map { song in
+                        self.createCatalogItem(from: song)
+                    }
+                } catch {
+                    print("⚠️ Direct songs search failed: \(error)")
+                    return []
+                }
             }
             
-            allSongs.append(contentsOf: directSongs.map { song in
-                createCatalogItem(from: song)
-            })
-        } catch {
-            print("⚠️ Direct songs search failed: \(error)")
-        }
-        
-        // Strategy 2: Search by popular song names + artist
-        let popularSongQueries = [
-            "\(artist.name) hits",
-            "\(artist.name) popular",
-            "\(artist.name) best",
-            "\(artist.name) top"
-        ]
-        
-        for query in popularSongQueries {
-            do {
-                var popularRequest = MusicCatalogSearchRequest(term: query, types: [MusicKit.Song.self])
-                popularRequest.limit = 25
-                
-                let popularResponse = try await popularRequest.response()
-                let popularSongs = popularResponse.songs.filter { song in
-                    isExactArtistMatch(song.artistName, targetArtist: artist.name)
-                }
-                
-                for song in popularSongs {
-                    let catalogItem = createCatalogItem(from: song)
-                    // Avoid duplicates
-                    if !allSongs.contains(where: { $0.id == catalogItem.id }) {
-                        allSongs.append(catalogItem)
+            // Task 2-5: Popular song searches in parallel
+            let popularSongQueries = [
+                "\(artist.name) hits",
+                "\(artist.name) popular",
+                "\(artist.name) best",
+                "\(artist.name) top"
+            ]
+            
+            for query in popularSongQueries {
+                group.addTask {
+                    do {
+                        var popularRequest = MusicCatalogSearchRequest(term: query, types: [MusicKit.Song.self])
+                        popularRequest.limit = 25
+                        
+                        let popularResponse = try await popularRequest.response()
+                        let popularSongs = popularResponse.songs.filter { song in
+                            self.isExactArtistMatch(song.artistName, targetArtist: artist.name)
+                        }
+                        
+                        return popularSongs.map { song in
+                            self.createCatalogItem(from: song)
+                        }
+                    } catch {
+                        print("⚠️ Popular songs search failed for '\(query)': \(error)")
+                        return []
                     }
                 }
-            } catch {
-                print("⚠️ Popular songs search failed for '\(query)': \(error)")
+            }
+            
+            // Collect all results
+            for await songBatch in group {
+                allSongs.append(contentsOf: songBatch)
             }
         }
         
@@ -776,6 +802,8 @@ class ArtistProfileViewModel: ObservableObject {
             allSongs.first { $0.id == id }
         }
         
+        print("✅ Loaded \(uniqueSongs.count) songs in parallel for \(artist.name)")
+        
         return uniqueSongs.sorted { song1, song2 in
             let date1 = song1.releaseDate ?? Date.distantPast
             let date2 = song2.releaseDate ?? Date.distantPast
@@ -783,7 +811,7 @@ class ArtistProfileViewModel: ObservableObject {
         }
     }
     
-    private func createCatalogItem(from song: MusicKit.Song) -> ArtistCatalogItem {
+    nonisolated private func createCatalogItem(from song: MusicKit.Song) -> ArtistCatalogItem {
         return ArtistCatalogItem(
             from: MusicSearchResult(
                 id: song.id.rawValue,
@@ -799,7 +827,7 @@ class ArtistProfileViewModel: ObservableObject {
         )
     }
     
-    private func isExactArtistMatch(_ songArtist: String, targetArtist: String) -> Bool {
+    nonisolated private func isExactArtistMatch(_ songArtist: String, targetArtist: String) -> Bool {
         let songArtistLower = songArtist.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let targetArtistLower = targetArtist.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -821,49 +849,60 @@ class ArtistProfileViewModel: ObservableObject {
     private func loadComprehensiveAlbumsFromAppleMusic(for artist: MusicKit.Artist) async throws -> [ArtistCatalogItem] {
         var allAlbums: [ArtistCatalogItem] = []
         
-        // Strategy 1: Direct albums search
-        do {
-            var albumsRequest = MusicCatalogSearchRequest(term: "\(artist.name) albums", types: [MusicKit.Album.self])
-            albumsRequest.limit = 50
+        // OPTIMIZATION: Use TaskGroup for parallel API calls instead of sequential
+        await withTaskGroup(of: [ArtistCatalogItem].self) { group in
             
-            let albumsResponse = try await albumsRequest.response()
-            let directAlbums = albumsResponse.albums.filter { album in
-                isExactArtistMatch(album.artistName, targetArtist: artist.name)
+            // Task 1: Direct albums search
+            group.addTask {
+                do {
+                    var albumsRequest = MusicCatalogSearchRequest(term: "\(artist.name) albums", types: [MusicKit.Album.self])
+                    albumsRequest.limit = 50
+                    
+                    let albumsResponse = try await albumsRequest.response()
+                    let directAlbums = albumsResponse.albums.filter { album in
+                        self.isExactArtistMatch(album.artistName, targetArtist: artist.name)
+                    }
+                    
+                    return directAlbums.map { album in
+                        self.createCatalogItem(from: album)
+                    }
+                } catch {
+                    print("⚠️ Direct albums search failed: \(error)")
+                    return []
+                }
             }
             
-            allAlbums.append(contentsOf: directAlbums.map { album in
-                createCatalogItem(from: album)
-            })
-        } catch {
-            print("⚠️ Direct albums search failed: \(error)")
-        }
-        
-        // Strategy 2: Search for discography and studio albums
-        let albumQueries = [
-            "\(artist.name) discography",
-            "\(artist.name) studio albums",
-            "\(artist.name) LP"
-        ]
-        
-        for query in albumQueries {
-            do {
-                var albumRequest = MusicCatalogSearchRequest(term: query, types: [MusicKit.Album.self])
-                albumRequest.limit = 25
-                
-                let albumResponse = try await albumRequest.response()
-                let queryAlbums = albumResponse.albums.filter { album in
-                    isExactArtistMatch(album.artistName, targetArtist: artist.name)
-                }
-                
-                for album in queryAlbums {
-                    let catalogItem = createCatalogItem(from: album)
-                    // Avoid duplicates
-                    if !allAlbums.contains(where: { $0.id == catalogItem.id }) {
-                        allAlbums.append(catalogItem)
+            // Task 2-4: Album searches in parallel
+            let albumQueries = [
+                "\(artist.name) discography",
+                "\(artist.name) studio albums",
+                "\(artist.name) LP"
+            ]
+            
+            for query in albumQueries {
+                group.addTask {
+                    do {
+                        var albumRequest = MusicCatalogSearchRequest(term: query, types: [MusicKit.Album.self])
+                        albumRequest.limit = 25
+                        
+                        let albumResponse = try await albumRequest.response()
+                        let queryAlbums = albumResponse.albums.filter { album in
+                            self.isExactArtistMatch(album.artistName, targetArtist: artist.name)
+                        }
+                        
+                        return queryAlbums.map { album in
+                            self.createCatalogItem(from: album)
+                        }
+                    } catch {
+                        print("⚠️ Album query search failed for '\(query)': \(error)")
+                        return []
                     }
                 }
-            } catch {
-                print("⚠️ Album query search failed for '\(query)': \(error)")
+            }
+            
+            // Collect all results
+            for await albumBatch in group {
+                allAlbums.append(contentsOf: albumBatch)
             }
         }
         
@@ -872,6 +911,8 @@ class ArtistProfileViewModel: ObservableObject {
             allAlbums.first { $0.id == id }
         }
         
+        print("✅ Loaded \(uniqueAlbums.count) albums in parallel for \(artist.name)")
+        
         return uniqueAlbums.sorted { album1, album2 in
             let date1 = album1.releaseDate ?? Date.distantPast
             let date2 = album2.releaseDate ?? Date.distantPast
@@ -879,7 +920,7 @@ class ArtistProfileViewModel: ObservableObject {
         }
     }
     
-    private func createCatalogItem(from album: MusicKit.Album) -> ArtistCatalogItem {
+    nonisolated private func createCatalogItem(from album: MusicKit.Album) -> ArtistCatalogItem {
         return ArtistCatalogItem(
             from: MusicSearchResult(
                 id: album.id.rawValue,
@@ -1249,6 +1290,20 @@ class PopularityCalculator {
     private func sigmoid(_ x: Double, midpoint: Double, steepness: Double) -> Double {
         return 1.0 / (1.0 + exp(-steepness * (x - midpoint)))
     }
+}
+
+// MARK: - Artist Rating Aggregation Helpers
+
+extension ArtistProfileViewModel {
+    /// Computes aggregate rating stats for this artist by combining song, album, and direct artist logs.
+    func computeOverallArtistRatingStats() async -> (average: Double, count: Int) {
+        let stats = await ArtistRatingsService.shared.fetchRatings(for: [artistName])
+        if let summary = stats[artistName] {
+            return (summary.average, summary.count)
+        }
+        return (0.0, 0)
+    }
+    
 }
 
 // MARK: - Array Extension for Chunking

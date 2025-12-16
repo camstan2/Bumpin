@@ -247,6 +247,10 @@ class TopicService: ObservableObject {
         let m = a.count
         let n = b.count
         
+        // Handle empty strings edge case
+        if m == 0 { return n }
+        if n == 0 { return m }
+        
         var matrix = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
         
         for i in 0...m {

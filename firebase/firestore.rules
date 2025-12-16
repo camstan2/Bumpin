@@ -23,6 +23,20 @@ service cloud.firestore {
       allow create: if isSignedIn() && request.auth.uid == uid;
       allow update: if isSignedIn() && request.auth.uid == uid;
       
+      // Following subcollection - users can read anyone's following list, manage their own
+      match /following/{followedUserId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && request.auth.uid == uid;
+        allow delete: if isSignedIn() && request.auth.uid == uid;
+      }
+      
+      // Followers subcollection - users can read anyone's followers list, but only the follower can write
+      match /followers/{followerUserId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && request.auth.uid == followerUserId;
+        allow delete: if isSignedIn() && request.auth.uid == followerUserId;
+      }
+      
       // User Notifications - users can read and update their own notifications
       match /notifications/{notificationId} {
         allow read: if isSignedIn() && request.auth.uid == uid;
@@ -30,6 +44,14 @@ service cloud.firestore {
         allow update: if isSignedIn() && request.auth.uid == uid; // Users can only update their own (mark as read)
         allow delete: if isSignedIn() && request.auth.uid == uid; // Users can delete their own notifications
       }
+    }
+
+    match /usernameDirectory/{usernameLower} {
+      allow read: if true;
+      allow create: if isSignedIn() &&
+        request.auth.uid == request.resource.data.userId &&
+        request.resource.data.username_lower == usernameLower;
+      allow update, delete: if isSignedIn() && request.auth.uid == resource.data.userId;
     }
 
     // Music logs
@@ -58,6 +80,13 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
       allow update, delete: if isSignedIn() && request.auth.uid == resource.data.userId;
+    }
+    
+    // Reposts collection - users can repost logs, read anyone's reposts
+    match /{path=**}/reposts/{repostId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.userId;
     }
 
     // Genre Corrections

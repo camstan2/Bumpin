@@ -400,39 +400,45 @@ struct BotConversationHeader: View {
 struct EnhancedConversationListItem: View {
     let conversation: Conversation
     let displayName: String
-    let profileImageUrl: String?
+    let subtitle: String
+    let participantsPreview: [(name: String, avatarUrl: String?)]
     let onTap: () -> Void
+    
+    @State private var isPressed = false
     
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: 12) {
-                // Avatar with bot indicator
+            HStack(spacing: 14) {
+                // Avatar with bot indicator - larger and more prominent
                 ZStack(alignment: .bottomTrailing) {
                     if conversation.isBotConversation {
                         botAvatarView
+                    } else if conversation.isGroupConversation {
+                        groupAvatarView
                     } else {
-                        userAvatarView
+                        singleAvatarView(name: participantsPreview.first?.name ?? displayName,
+                                         url: participantsPreview.first?.avatarUrl)
                     }
                     
                     if conversation.isBotConversation {
                         Circle()
                             .fill(Color.purple)
-                            .frame(width: 16, height: 16)
+                            .frame(width: 18, height: 18)
                             .overlay(
                                 Image(systemName: "heart.fill")
-                                    .font(.system(size: 8))
+                                    .font(.system(size: 9))
                                     .foregroundColor(.white)
                             )
-                            .offset(x: 2, y: 2)
+                            .offset(x: 3, y: 3)
                     }
                 }
                 
                 // Conversation info
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     HStack {
                         Text(displayName)
                             .font(.subheadline)
-                            .fontWeight(.semibold)
+                            .fontWeight(.bold)
                             .foregroundColor(.primary)
                         
                         if conversation.isBotConversation {
@@ -451,20 +457,30 @@ struct EnhancedConversationListItem: View {
                         if let timestamp = conversation.lastTimestamp {
                             Text(timestamp, style: .relative)
                                 .font(.caption2)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.secondary.opacity(0.8))
                         }
                     }
                     
-                    Text(conversation.lastMessage ?? "")
+                    Text(subtitle)
                         .font(.caption)
+                        .fontWeight(.medium)
                         .foregroundColor(.secondary)
                         .lineLimit(2)
                 }
                 
                 Spacer()
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
         }
         .buttonStyle(.plain)
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
     
     // MARK: - Avatar Views
@@ -479,30 +495,51 @@ struct EnhancedConversationListItem: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .frame(width: 44, height: 44)
+                .frame(width: 56, height: 56)
+                .shadow(color: Color.black.opacity(0.08), radius: 4, x: 0, y: 2)
             
             Image(systemName: "heart.text.square.fill")
-                .font(.system(size: 20))
+                .font(.system(size: 24))
                 .foregroundColor(.white)
         }
     }
     
-    private var userAvatarView: some View {
-        AsyncImage(url: URL(string: profileImageUrl ?? "")) { image in
+    private var groupAvatarView: some View {
+        let previews = participantsPreview.prefix(2)
+        return ZStack {
+            ForEach(Array(previews.enumerated()), id: \.offset) { index, meta in
+                singleAvatarView(name: meta.name, url: meta.avatarUrl)
+                    .frame(width: 42, height: 42)
+                    .offset(x: index == 0 ? -10 : 10)
+            }
+        }
+        .frame(width: 58, height: 58)
+        .shadow(color: Color.black.opacity(0.08), radius: 4, x: 0, y: 2)
+    }
+    
+    private func singleAvatarView(name: String, url: String?) -> some View {
+        AsyncImage(url: URL(string: url ?? "")) { image in
             image
                 .resizable()
                 .aspectRatio(contentMode: .fill)
         } placeholder: {
             Circle()
-                .fill(Color(.systemGray4))
+                .fill(
+                    LinearGradient(
+                        colors: [Color.purple.opacity(0.3), Color.blue.opacity(0.2)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
                 .overlay(
-                    Text(displayName.prefix(1).uppercased())
+                        Text(name.prefix(1).uppercased())
                         .font(.headline)
                         .foregroundColor(.white)
                 )
         }
-        .frame(width: 44, height: 44)
         .clipShape(Circle())
+        .frame(width: 48, height: 48) // unified size for single avatar
+        .shadow(color: Color.black.opacity(0.08), radius: 3, x: 0, y: 1)
     }
 }
 

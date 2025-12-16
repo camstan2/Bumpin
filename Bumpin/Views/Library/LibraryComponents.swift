@@ -462,6 +462,8 @@ struct LibrarySearchBar: View {
             
             TextField("Search your library", text: $searchText)
                 .textFieldStyle(PlainTextFieldStyle())
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
                 .onChange(of: searchText) { _, newValue in
                     onSearchChanged(newValue)
                 }

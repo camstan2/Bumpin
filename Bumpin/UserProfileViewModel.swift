@@ -100,12 +100,24 @@ struct UserProfile: Identifiable, Codable, Equatable {
     let profilePictureUrl: String?
     let profileHeaderUrl: String?
     let bio: String?
+    // NOTE: followers/following arrays removed - now using subcollections
+    // Legacy fields kept as optional for backward compatibility during decoding
     let followers: [String]?
     let following: [String]?
     let isVerified: Bool?
     let roles: [String]?
     let reportCount: Int?
     let violationCount: Int?
+    let warningCount: Int? = nil
+    let lastWarningAt: Date? = nil
+    let isMuted: Bool? = nil
+    let mutedUntil: Date? = nil
+    let isSuspended: Bool? = nil
+    let suspensionReason: String? = nil
+    let suspensionExpiresAt: Date? = nil
+    let isBanned: Bool? = nil
+    let banReason: String? = nil
+    let banExpiresAt: Date? = nil
     let locationSharingWith: [String]? // Friends you share location with
     let showNowPlaying: Bool?
     let nowPlayingSong: String?
@@ -133,6 +145,10 @@ struct UserProfile: Identifiable, Codable, Equatable {
     var totalSocialRatings: Int? // Total number of social ratings received
     var socialBadges: [String]? // Array of earned social badge IDs
     var socialScoreLastUpdated: Date? // Last time social score was updated
+    
+    // MARK: - Denormalized follow counts (optional for fast loads)
+    var followerCount: Int?
+    var followingCount: Int?
 }
 
 class UserProfileViewModel: ObservableObject {
@@ -149,6 +165,11 @@ class UserProfileViewModel: ObservableObject {
     @Published var likeCount: Int = 0
     @Published var isFollowing = false
     @Published var isFollowActionLoading = false
+    
+    // NEW: Subcollection-based counts
+    @Published var followerCount: Int = 0
+    @Published var followingCount: Int = 0
+    @Published var isLoadingCounts = false
     
     private var listener: ListenerRegistration?
     private var activityListener: ListenerRegistration?
@@ -173,6 +194,13 @@ class UserProfileViewModel: ObservableObject {
                 do {
                     let profile = try snapshot.data(as: UserProfile.self)
                     self.profile = profile
+                    // Seed counts from denormalized fields if present
+                    if let followerCount = profile.followerCount {
+                        self.followerCount = followerCount
+                    }
+                    if let followingCount = profile.followingCount {
+                        self.followingCount = followingCount
+                    }
                 } catch {
                     self.errorMessage = "Failed to decode profile."
                 }
@@ -208,15 +236,20 @@ class UserProfileViewModel: ObservableObject {
     }
 
     func fetchStats(for userId: String) {
-        // Fetch logs
-        MusicLog.fetchLogsForUser(userId: userId) { logs, error in
-            guard let logs = logs else { return }
-            DispatchQueue.main.async {
-                self.logCount = logs.count
-                self.uniqueSongCount = Set(logs.filter { $0.itemType == "song" }.map { $0.itemId }).count
-                self.uniqueArtistCount = Set(logs.map { $0.artistName }).count
-                self.uniqueAlbumCount = Set(logs.filter { $0.itemType == "album" }.map { $0.itemId }).count
-                self.reviewCount = logs.filter { ($0.review?.isEmpty == false) }.count
+        Task {
+            do {
+                let logs = try await MusicLogStore.shared.fetchLogs(forUserId: userId)
+                await MainActor.run {
+                    self.logCount = logs.count
+                    self.uniqueSongCount = Set(logs.filter { $0.itemType == "song" }.map { $0.itemId }).count
+                    self.uniqueArtistCount = Set(logs.map { $0.artistName }).count
+                    self.uniqueAlbumCount = Set(logs.filter { $0.itemType == "album" }.map { $0.itemId }).count
+                    self.reviewCount = logs.filter { ($0.review?.isEmpty == false) }.count
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
             }
         }
         // Fetch lists
@@ -238,17 +271,114 @@ class UserProfileViewModel: ObservableObject {
     
     // MARK: - Follow/Unfollow Methods
     
+    // NEW: Fetch follower/following counts from subcollections
+    func fetchFollowerCount(for userId: String) async -> Int {
+        do {
+            let snapshot = try await Firestore.firestore()
+                .collection("users")
+                .document(userId)
+                .collection("followers")
+                .getDocuments()
+            return snapshot.documents.count
+        } catch {
+            print("❌ Error fetching follower count: \(error.localizedDescription)")
+            return 0
+        }
+    }
+    
+    func fetchFollowingCount(for userId: String) async -> Int {
+        do {
+            let snapshot = try await Firestore.firestore()
+                .collection("users")
+                .document(userId)
+                .collection("following")
+                .getDocuments()
+            return snapshot.documents.count
+        } catch {
+            print("❌ Error fetching following count: \(error.localizedDescription)")
+            return 0
+        }
+    }
+    
+    func loadFollowCounts(for userId: String) {
+        isLoadingCounts = true
+        Task {
+            let db = Firestore.firestore()
+            let docRef = db.collection("users").document(userId)
+            
+            do {
+                let snapshot = try await docRef.getDocument()
+                let data = snapshot.data() ?? [:]
+                
+                var follower = data["followerCount"] as? Int
+                var following = data["followingCount"] as? Int
+                
+                // If counts are missing, fall back to subcollection counts (slow path)
+                if follower == nil || following == nil {
+                    async let followersTask = fetchFollowerCount(for: userId)
+                    async let followingTask = fetchFollowingCount(for: userId)
+                    
+                    let fetchedFollowers = try? await followersTask
+                    let fetchedFollowing = try? await followingTask
+                    
+                    if follower == nil { follower = fetchedFollowers }
+                    if following == nil { following = fetchedFollowing }
+                    
+                    // Backfill counts to the user document for faster future loads
+                    var updates: [String: Any] = [:]
+                    if let follower = follower { updates["followerCount"] = follower }
+                    if let following = following { updates["followingCount"] = following }
+                    if !updates.isEmpty {
+                        try? await docRef.setData(updates, merge: true)
+                    }
+                }
+                
+                await MainActor.run {
+                    self.followerCount = follower ?? 0
+                    self.followingCount = following ?? 0
+                    self.isLoadingCounts = false
+                    print("✅ Loaded counts - Followers: \(self.followerCount), Following: \(self.followingCount)")
+                }
+                
+            } catch {
+                print("❌ Error loading follow counts: \(error.localizedDescription)")
+                // Fallback to 0 if everything fails
+                await MainActor.run {
+                    self.followerCount = 0
+                    self.followingCount = 0
+                    self.isLoadingCounts = false
+                }
+            }
+        }
+    }
+    
     func checkIfFollowing(userId: String) {
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        guard let currentUserId = Auth.auth().currentUser?.uid else {
+            print("❌ [checkIfFollowing] No current user")
+            return
+        }
         
-        Firestore.firestore().collection("users").document(currentUserId)
+        print("🔍 [checkIfFollowing] Checking if \(currentUserId) follows \(userId)")
+        
+        // Check the following subcollection instead of the array
+        Firestore.firestore().collection("users")
+            .document(currentUserId)
+            .collection("following")
+            .document(userId)
             .getDocument { [weak self] snapshot, error in
                 guard let self = self else { return }
-                if let data = snapshot?.data(),
-                   let following = data["following"] as? [String] {
-                    DispatchQueue.main.async {
-                        self.isFollowing = following.contains(userId)
-                    }
+                
+                if let error = error {
+                    print("❌ [checkIfFollowing] Error: \(error.localizedDescription)")
+                } else {
+                    let exists = snapshot?.exists ?? false
+                    print("📊 [checkIfFollowing] Document exists: \(exists)")
+                    print("   Path: users/\(currentUserId)/following/\(userId)")
+                }
+                
+                DispatchQueue.main.async {
+                    self.isFollowing = snapshot?.exists ?? false
+                    print("✅ [checkIfFollowing] isFollowing set to: \(self.isFollowing)")
                 }
             }
     }
@@ -265,7 +395,11 @@ class UserProfileViewModel: ObservableObject {
             // If offline, enqueue and optimistically update UI
             if !OfflineActionQueue.shared.isOnline {
                 OfflineActionQueue.shared.enqueueFollow(currentUserId: currentUserId, targetUserId: userId)
-                DispatchQueue.main.async { self.isFollowActionLoading = false; self.isFollowing = true }
+                DispatchQueue.main.async {
+                    self.isFollowActionLoading = false
+                    self.isFollowing = true
+                    self.followingCount += 1
+                }
                 return
             }
             followUser(currentUserId: currentUserId, targetUserId: userId)
@@ -274,64 +408,80 @@ class UserProfileViewModel: ObservableObject {
     
     private func followUser(currentUserId: String, targetUserId: String) {
         let db = Firestore.firestore()
-        let currentUserRef = db.collection("users").document(currentUserId)
-        let targetUserRef = db.collection("users").document(targetUserId)
         
-        // Step 1: Update current user's following (authoritative success condition)
-        currentUserRef.updateData(["following": FieldValue.arrayUnion([targetUserId])]) { [weak self] error in
-            guard let self = self else { return }
-            if let error = error {
-                DispatchQueue.main.async {
-                    self.isFollowActionLoading = false
-                    self.errorMessage = "Failed to follow user: \(error.localizedDescription)"
+        print("🔄 [followUser] Starting follow action")
+        print("   Current user: \(currentUserId)")
+        print("   Target user: \(targetUserId)")
+        
+        // Use subcollections instead of arrays
+        Task {
+            do {
+                // Step 1: Add to current user's following subcollection
+                print("📝 [followUser] Writing to users/\(currentUserId)/following/\(targetUserId)")
+                try await db.collection("users")
+                    .document(currentUserId)
+                    .collection("following")
+                    .document(targetUserId)
+                    .setData(["timestamp": FieldValue.serverTimestamp()])
+                print("✅ [followUser] Step 1 complete")
+                
+                // Optimistically mark as following and update the TARGET user's follower count
+                await MainActor.run {
+                    self.isFollowing = true
+                    self.followerCount += 1 // Target user gains a follower
                 }
-                return
-            }
-            // Optimistically mark as following
-            DispatchQueue.main.async { self.isFollowing = true }
-            
-            // Step 2 (best-effort): Update target user's followers
-            targetUserRef.updateData(["followers": FieldValue.arrayUnion([currentUserId])]) { _ in
-                // Ignore permission errors here; UI state is based on step 1
-                DispatchQueue.main.async {
+                
+                // Step 2: Add to target user's followers subcollection
+                print("📝 [followUser] Writing to users/\(targetUserId)/followers/\(currentUserId)")
+                try await db.collection("users")
+                    .document(targetUserId)
+                    .collection("followers")
+                    .document(currentUserId)
+                    .setData(["timestamp": FieldValue.serverTimestamp()])
+                print("✅ [followUser] Step 2 complete")
+                
+                // Create follow notification first (this is the important user-facing action)
+                await NotificationService.shared.createFollowNotification(followedUserId: targetUserId)
+                print("✅ [followUser] Notification created")
+                
+                await MainActor.run {
                     self.isFollowActionLoading = false
-                    // If viewing target profile, update local snapshot
-                    if let profile = self.profile, profile.uid == targetUserId {
-                        var updated = profile
-                        var followers = updated.followers ?? []
-                        if !followers.contains(currentUserId) { followers.append(currentUserId) }
-                        updated = UserProfile(
-                            uid: updated.uid,
-                            email: updated.email,
-                            username: updated.username,
-                            displayName: updated.displayName,
-                            createdAt: updated.createdAt,
-                            profilePictureUrl: updated.profilePictureUrl,
-                            profileHeaderUrl: updated.profileHeaderUrl,
-                            bio: updated.bio,
-                            followers: followers,
-                            following: updated.following,
-                            isVerified: updated.isVerified,
-                            roles: updated.roles,
-                            reportCount: updated.reportCount,
-                            violationCount: updated.violationCount,
-                            locationSharingWith: updated.locationSharingWith,
-                            showNowPlaying: updated.showNowPlaying,
-                            nowPlayingSong: updated.nowPlayingSong,
-                            nowPlayingArtist: updated.nowPlayingArtist,
-                            nowPlayingAlbumArt: updated.nowPlayingAlbumArt,
-                            nowPlayingUpdatedAt: updated.nowPlayingUpdatedAt,
-                            pinnedSongs: updated.pinnedSongs,
-                            pinnedArtists: updated.pinnedArtists,
-                            pinnedAlbums: updated.pinnedAlbums,
-                            pinnedLists: updated.pinnedLists,
-                            pinnedSongsRanked: updated.pinnedSongsRanked,
-                            pinnedArtistsRanked: updated.pinnedArtistsRanked,
-                            pinnedAlbumsRanked: updated.pinnedAlbumsRanked,
-                            pinnedListsRanked: updated.pinnedListsRanked
-                        )
-                        self.profile = updated
+                    print("✅ [followUser] Successfully followed user: \(targetUserId)")
+                }
+                
+                // Step 3: Denormalized counters for fast loads (fire-and-forget, don't let failures affect the follow state)
+                Task.detached {
+                    do {
+                        // Use setData with merge to handle cases where the field doesn't exist
+                        try await db.collection("users")
+                            .document(currentUserId)
+                            .setData(["followingCount": FieldValue.increment(Int64(1))], merge: true)
+                        
+                        try await db.collection("users")
+                            .document(targetUserId)
+                            .setData(["followerCount": FieldValue.increment(Int64(1))], merge: true)
+                        
+                        print("✅ [followUser] Denormalized counters updated")
+                    } catch {
+                        print("⚠️ [followUser] Failed to update denormalized counters (non-critical): \(error)")
                     }
+                }
+                
+            } catch {
+                await MainActor.run {
+                    self.isFollowActionLoading = false
+                    self.isFollowing = false // Revert optimistic update
+                    self.followerCount = max(0, self.followerCount - 1) // Revert count
+                    self.errorMessage = "Unable to follow user. Please try again."
+                    print("❌ [followUser] Error following user: \(error)")
+                    print("   Error details: \(error)")
+                    
+                    // Show alert to user
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("ShowFollowError"),
+                        object: nil,
+                        userInfo: ["message": "Unable to follow user. Please try again."]
+                    )
                 }
             }
         }
@@ -339,62 +489,76 @@ class UserProfileViewModel: ObservableObject {
     
     private func unfollowUser(currentUserId: String, targetUserId: String) {
         let db = Firestore.firestore()
-        let currentUserRef = db.collection("users").document(currentUserId)
-        let targetUserRef = db.collection("users").document(targetUserId)
         
-        // Step 1: Update current user's following
-        currentUserRef.updateData(["following": FieldValue.arrayRemove([targetUserId])]) { [weak self] error in
-            guard let self = self else { return }
-            if let error = error {
-                DispatchQueue.main.async {
-                    self.isFollowActionLoading = false
-                    self.errorMessage = "Failed to unfollow user: \(error.localizedDescription)"
+        print("🔄 [unfollowUser] Starting unfollow action")
+        print("   Current user: \(currentUserId)")
+        print("   Target user: \(targetUserId)")
+        
+        // Use subcollections instead of arrays
+        Task {
+            do {
+                // Step 1: Remove from current user's following subcollection
+                print("📝 [unfollowUser] Deleting users/\(currentUserId)/following/\(targetUserId)")
+                try await db.collection("users")
+                    .document(currentUserId)
+                    .collection("following")
+                    .document(targetUserId)
+                    .delete()
+                print("✅ [unfollowUser] Step 1 complete")
+                
+                // Optimistically mark as not following and update the TARGET user's follower count
+                await MainActor.run {
+                    self.isFollowing = false
+                    self.followerCount = max(0, self.followerCount - 1) // Target user loses a follower
                 }
-                return
-            }
-            // Optimistically mark as not following
-            DispatchQueue.main.async { self.isFollowing = false }
-            
-            // Step 2 (best-effort): Update target user's followers
-            targetUserRef.updateData(["followers": FieldValue.arrayRemove([currentUserId])]) { _ in
-                DispatchQueue.main.async {
+                
+                // Step 2: Remove from target user's followers subcollection
+                print("📝 [unfollowUser] Deleting users/\(targetUserId)/followers/\(currentUserId)")
+                try await db.collection("users")
+                    .document(targetUserId)
+                    .collection("followers")
+                    .document(currentUserId)
+                    .delete()
+                print("✅ [unfollowUser] Step 2 complete")
+                
+                await MainActor.run {
                     self.isFollowActionLoading = false
-                    if let profile = self.profile, profile.uid == targetUserId {
-                        var updated = profile
-                        var followers = updated.followers ?? []
-                        followers.removeAll { $0 == currentUserId }
-                        updated = UserProfile(
-                            uid: updated.uid,
-                            email: updated.email,
-                            username: updated.username,
-                            displayName: updated.displayName,
-                            createdAt: updated.createdAt,
-                            profilePictureUrl: updated.profilePictureUrl,
-                            profileHeaderUrl: updated.profileHeaderUrl,
-                            bio: updated.bio,
-                            followers: followers,
-                            following: updated.following,
-                            isVerified: updated.isVerified,
-                            roles: updated.roles,
-                            reportCount: updated.reportCount,
-                            violationCount: updated.violationCount,
-                            locationSharingWith: updated.locationSharingWith,
-                            showNowPlaying: updated.showNowPlaying,
-                            nowPlayingSong: updated.nowPlayingSong,
-                            nowPlayingArtist: updated.nowPlayingArtist,
-                            nowPlayingAlbumArt: updated.nowPlayingAlbumArt,
-                            nowPlayingUpdatedAt: updated.nowPlayingUpdatedAt,
-                            pinnedSongs: updated.pinnedSongs,
-                            pinnedArtists: updated.pinnedArtists,
-                            pinnedAlbums: updated.pinnedAlbums,
-                            pinnedLists: updated.pinnedLists,
-                            pinnedSongsRanked: updated.pinnedSongsRanked,
-                            pinnedArtistsRanked: updated.pinnedArtistsRanked,
-                            pinnedAlbumsRanked: updated.pinnedAlbumsRanked,
-                            pinnedListsRanked: updated.pinnedListsRanked
-                        )
-                        self.profile = updated
+                    print("✅ [unfollowUser] Successfully unfollowed user: \(targetUserId)")
+                }
+                
+                // Step 3: Denormalized counters for fast loads (fire-and-forget, don't let failures affect the unfollow state)
+                Task.detached {
+                    do {
+                        // Use setData with merge to handle cases where the field doesn't exist
+                        try await db.collection("users")
+                            .document(currentUserId)
+                            .setData(["followingCount": FieldValue.increment(Int64(-1))], merge: true)
+                        
+                        try await db.collection("users")
+                            .document(targetUserId)
+                            .setData(["followerCount": FieldValue.increment(Int64(-1))], merge: true)
+                        
+                        print("✅ [unfollowUser] Denormalized counters updated")
+                    } catch {
+                        print("⚠️ [unfollowUser] Failed to update denormalized counters (non-critical): \(error)")
                     }
+                }
+                
+            } catch {
+                await MainActor.run {
+                    self.isFollowActionLoading = false
+                    self.isFollowing = true // Revert optimistic update
+                    self.followerCount += 1 // Revert count
+                    self.errorMessage = "Unable to unfollow user. Please try again."
+                    print("❌ [unfollowUser] Error unfollowing user: \(error)")
+                    print("   Error details: \(error)")
+                    
+                    // Show alert to user
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("ShowFollowError"),
+                        object: nil,
+                        userInfo: ["message": "Unable to unfollow user. Please try again."]
+                    )
                 }
             }
         }
@@ -480,6 +644,68 @@ class UserProfileViewModel: ObservableObject {
         }
         
         return profiles
+    }
+    
+    // MARK: - Migration Function
+    
+    /// Migrates legacy array-based followers/following to subcollections
+    /// Call this once for users with existing data
+    static func migrateFollowDataToSubcollections(for userId: String) async throws {
+        let db = Firestore.firestore()
+        
+        print("🔄 [Migration] Starting follow data migration for user: \(userId)")
+        
+        // Fetch user document
+        let userDoc = try await db.collection("users").document(userId).getDocument()
+        guard let data = userDoc.data() else {
+            print("⚠️ [Migration] No user data found")
+            return
+        }
+        
+        // Migrate followers
+        if let followers = data["followers"] as? [String], !followers.isEmpty {
+            print("📦 [Migration] Migrating \(followers.count) followers...")
+            for followerId in followers {
+                do {
+                    try await db.collection("users")
+                        .document(userId)
+                        .collection("followers")
+                        .document(followerId)
+                        .setData(["timestamp": FieldValue.serverTimestamp(), "migrated": true])
+                    print("✅ [Migration] Migrated follower: \(followerId)")
+                } catch {
+                    print("❌ [Migration] Failed to migrate follower \(followerId): \(error)")
+                }
+            }
+        }
+        
+        // Migrate following
+        if let following = data["following"] as? [String], !following.isEmpty {
+            print("📦 [Migration] Migrating \(following.count) following...")
+            for targetId in following {
+                do {
+                    // Add to current user's following subcollection
+                    try await db.collection("users")
+                        .document(userId)
+                        .collection("following")
+                        .document(targetId)
+                        .setData(["timestamp": FieldValue.serverTimestamp(), "migrated": true])
+                    
+                    // Add to target user's followers subcollection
+                    try await db.collection("users")
+                        .document(targetId)
+                        .collection("followers")
+                        .document(userId)
+                        .setData(["timestamp": FieldValue.serverTimestamp(), "migrated": true])
+                    
+                    print("✅ [Migration] Migrated following: \(targetId)")
+                } catch {
+                    print("❌ [Migration] Failed to migrate following \(targetId): \(error)")
+                }
+            }
+        }
+        
+        print("✅ [Migration] Completed follow data migration for user: \(userId)")
     }
     
     deinit {

@@ -2,177 +2,249 @@ import Foundation
 import FirebaseFirestore
 import FirebaseAuth
 
-// MARK: - Universal Track Migration Service
-
+/// Service for migrating existing MusicLog entries to include universalTrackId and musicPlatform
 @MainActor
 class UniversalTrackMigrationService: ObservableObject {
-    
-    // MARK: - Migration Status
-    
-    @Published var isMigrating = false
-    @Published var migrationProgress: Double = 0.0
-    @Published var migrationStatus = "Ready to migrate"
-    @Published var migratedCount = 0
-    @Published var totalCount = 0
-    
-    // MARK: - Singleton
     static let shared = UniversalTrackMigrationService()
     
-    private init() {}
+    @Published var isRunning = false
+    @Published var progress: Double = 0.0
+    @Published var totalLogs = 0
+    @Published var processedLogs = 0
+    @Published var successfulUpdates = 0
+    @Published var failedUpdates = 0
+    @Published var skippedLogs = 0
+    @Published var errorMessages: [String] = []
+    @Published var lastRunDate: Date?
     
-    // MARK: - Migration Methods
+    private let db = Firestore.firestore()
+    private let batchSize = 100 // Process 100 logs at a time
     
-    /// Migrate all existing Apple Music logs to use universal tracks
-    func migrateAllExistingLogs() async {
-        guard !isMigrating else { return }
+    private init() {
+        loadLastRunDate()
+    }
+    
+    // MARK: - Migration Control
+    
+    /// Run the migration for all logs without universalTrackId
+    func runMigration() async {
+        guard !isRunning else {
+            print("⚠️ Migration already running")
+            return
+        }
         
-        isMigrating = true
-        migrationProgress = 0.0
-        migrationStatus = "Starting migration..."
-        migratedCount = 0
+        isRunning = true
+        progress = 0.0
+        processedLogs = 0
+        successfulUpdates = 0
+        failedUpdates = 0
+        skippedLogs = 0
+        errorMessages.removeAll()
         
-        print("🔄 Starting universal track migration for existing logs...")
-        
-        let db = Firestore.firestore()
+        print("🚀 Starting Universal Track Migration...")
         
         do {
-            // Get total count first
-            let countSnapshot = try await db.collection("logs")
-                .whereField("universalTrackId", isEqualTo: NSNull())
-                .whereField("itemType", isEqualTo: "song")
-                .count
-                .getAggregation(source: .server)
+            // Get total count of logs without universalTrackId
+            totalLogs = try await fetchTotalLogsToMigrate()
+            print("📊 Found \(totalLogs) logs to migrate")
             
-            totalCount = Int(countSnapshot.count)
-            migrationStatus = "Found \(totalCount) logs to migrate"
-            
-            // Process in batches to avoid overwhelming Firestore
-            let batchSize = 20
-            var processedCount = 0
-            
-            while processedCount < totalCount {
-                let snapshot = try await db.collection("logs")
-                    .whereField("universalTrackId", isEqualTo: NSNull())
-                    .whereField("itemType", isEqualTo: "song")
-                    .limit(to: batchSize)
-                    .getDocuments()
-                
-                if snapshot.documents.isEmpty {
-                    break // No more logs to process
-                }
-                
-                migrationStatus = "Processing batch \(processedCount / batchSize + 1)..."
-                
-                // Process batch
-                for document in snapshot.documents {
-                    if let log = try? document.data(as: MusicLog.self) {
-                        await migrateSingleLog(log, document: document)
-                        migratedCount += 1
-                        processedCount += 1
-                        
-                        // Update progress
-                        migrationProgress = Double(processedCount) / Double(totalCount)
-                    }
-                }
-                
-                // Small delay between batches
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+            if totalLogs == 0 {
+                print("✅ No logs to migrate!")
+                isRunning = false
+                return
             }
             
-            migrationStatus = "Migration completed! \(migratedCount) logs migrated."
-            print("✅ Migration completed: \(migratedCount) logs migrated to universal tracks")
+            // Process in batches
+            var lastDocument: DocumentSnapshot? = nil
+            var hasMore = true
+            
+            while hasMore {
+                let result = try await processBatch(after: lastDocument)
+                lastDocument = result.lastDocument
+                hasMore = result.hasMore
+                
+                // Update progress
+                progress = Double(processedLogs) / Double(totalLogs)
+                
+                print("📈 Progress: \(processedLogs)/\(totalLogs) (\(Int(progress * 100))%)")
+                
+                // Add a small delay to avoid overwhelming Firestore
+                try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+            }
+            
+            print("✅ Migration complete!")
+            print("   Processed: \(processedLogs)")
+            print("   Successful: \(successfulUpdates)")
+            print("   Failed: \(failedUpdates)")
+            print("   Skipped: \(skippedLogs)")
+            
+            // Save last run date
+            lastRunDate = Date()
+            saveLastRunDate()
             
         } catch {
-            migrationStatus = "Migration failed: \(error.localizedDescription)"
             print("❌ Migration error: \(error.localizedDescription)")
+            errorMessages.append("Migration failed: \(error.localizedDescription)")
         }
         
-        isMigrating = false
+        isRunning = false
     }
     
-    /// Migrate a single log to use universal track
-    private func migrateSingleLog(_ log: MusicLog, document: QueryDocumentSnapshot) async {
+    // MARK: - Batch Processing
+    
+    private func processBatch(after lastDoc: DocumentSnapshot?) async throws -> (lastDocument: DocumentSnapshot?, hasMore: Bool) {
+        // Query logs without universalTrackId
+        var query = db.collection("logs")
+            .order(by: "dateLogged", descending: true)
+            .limit(to: batchSize)
+        
+        if let lastDoc = lastDoc {
+            query = query.start(afterDocument: lastDoc)
+        }
+        
+        let snapshot = try await query.getDocuments()
+        
+        guard !snapshot.documents.isEmpty else {
+            return (nil, false)
+        }
+        
+        // Filter logs that need migration (no universalTrackId or no musicPlatform)
+        let logsToMigrate = snapshot.documents.compactMap { doc -> (doc: DocumentSnapshot, log: MusicLog)? in
+            guard let log = try? doc.data(as: MusicLog.self) else { return nil }
+            
+            // Only migrate logs that are missing universalTrackId or musicPlatform
+            if log.universalTrackId == nil || log.musicPlatform == nil {
+                return (doc, log)
+            }
+            return nil
+        }
+        
+        print("🔄 Processing batch: \(logsToMigrate.count) logs to migrate out of \(snapshot.documents.count)")
+        
+        // Process each log
+        for (doc, log) in logsToMigrate {
+            await migrateLog(doc: doc, log: log)
+            processedLogs += 1
+        }
+        
+        // Count skipped logs (already migrated)
+        let skipped = snapshot.documents.count - logsToMigrate.count
+        skippedLogs += skipped
+        processedLogs += skipped
+        
+        return (snapshot.documents.last, snapshot.documents.count == batchSize)
+    }
+    
+    private func migrateLog(doc: DocumentSnapshot, log: MusicLog) async {
         do {
-            // Create or find universal track
-            let universalTrack = await TrackMatchingService.shared.getUniversalTrack(
-                title: log.title,
-                artist: log.artistName,
-                appleMusicId: log.itemId
-            )
+            // Determine platform (default to apple_music for existing logs)
+            let platform = log.musicPlatform ?? "apple_music"
             
-            // Update the log document
-            try await document.reference.updateData([
-                "universalTrackId": universalTrack.id,
-                "musicPlatform": "apple_music",
-                "platformMatchingConfidence": universalTrack.matchingConfidence
-            ])
+            // Get or create universal track
+            let universalTrack: UniversalTrack
             
-            print("✅ Migrated: \(log.title) → \(universalTrack.id)")
+            // For albums, use title as album name. For songs, use empty string since we don't have album info
+            let albumName = log.itemType == "album" ? log.title : ""
+            
+            if platform == "apple_music" {
+                universalTrack = await TrackMatchingService.shared.getUniversalTrack(
+                    title: log.title,
+                    artist: log.artistName,
+                    albumName: albumName,
+                    appleMusicId: log.itemId
+                )
+            } else {
+                universalTrack = await TrackMatchingService.shared.getUniversalTrack(
+                    title: log.title,
+                    artist: log.artistName,
+                    albumName: albumName,
+                    spotifyId: log.itemId
+                )
+            }
+            
+            // Try multiple approaches to update the log
+            do {
+                // Approach 1: Try updateData first (most efficient)
+                try await db.collection("logs").document(doc.documentID).updateData([
+                    "universalTrackId": universalTrack.id,
+                    "musicPlatform": platform,
+                    "platformMatchingConfidence": 1.0
+                ])
+            } catch {
+                // Approach 2: If updateData fails, try setData with merge
+                print("⚠️ UpdateData failed, trying setData with merge for log \(doc.documentID)")
+                guard var logData = doc.data() else {
+                    throw NSError(domain: "MigrationError", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not get document data"])
+                }
+                logData["universalTrackId"] = universalTrack.id
+                logData["musicPlatform"] = platform
+                logData["platformMatchingConfidence"] = 1.0
+                
+                try await db.collection("logs").document(doc.documentID).setData(logData, merge: true)
+            }
+            
+            successfulUpdates += 1
+            print("✅ Migrated log: \(log.title) by \(log.artistName) -> \(universalTrack.id)")
             
         } catch {
-            print("❌ Failed to migrate log \(log.id): \(error.localizedDescription)")
+            failedUpdates += 1
+            let errorMsg = "Failed to migrate log \(doc.documentID): \(error.localizedDescription)"
+            print("❌ \(errorMsg)")
+            errorMessages.append(errorMsg)
         }
     }
     
-    /// Check migration status
-    func checkMigrationStatus() async -> (total: Int, migrated: Int) {
-        let db = Firestore.firestore()
+    // MARK: - Helper Methods
+    
+    private func fetchTotalLogsToMigrate() async throws -> Int {
+        // Note: This is an approximation since we can't efficiently count logs without universalTrackId
+        // We'll fetch a sample and extrapolate, or just count all logs for simplicity
+        let snapshot = try await db.collection("logs").getDocuments()
         
+        // Count logs that need migration
+        let needsMigration = snapshot.documents.filter { doc in
+            guard let log = try? doc.data(as: MusicLog.self) else { return false }
+            return log.universalTrackId == nil || log.musicPlatform == nil
+        }.count
+        
+        return needsMigration
+    }
+    
+    // MARK: - Persistence
+    
+    private func loadLastRunDate() {
+        if let timestamp = UserDefaults.standard.object(forKey: "lastUniversalTrackMigrationDate") as? Date {
+            lastRunDate = timestamp
+        }
+    }
+    
+    private func saveLastRunDate() {
+        if let date = lastRunDate {
+            UserDefaults.standard.set(date, forKey: "lastUniversalTrackMigrationDate")
+        }
+    }
+    
+    // MARK: - Status Check
+    
+    func checkMigrationStatus() async -> MigrationStatus {
         do {
-            async let totalSnapshot = db.collection("logs")
-                .whereField("itemType", isEqualTo: "song")
-                .count
-                .getAggregation(source: .server)
-            
-            async let migratedSnapshot = db.collection("logs")
-                .whereField("itemType", isEqualTo: "song")
-                .whereField("universalTrackId", isNotEqualTo: NSNull())
-                .count
-                .getAggregation(source: .server)
-            
-            let (total, migrated) = try await (totalSnapshot, migratedSnapshot)
-            return (total: Int(total.count), migrated: Int(migrated.count))
-            
+            let needsMigration = try await fetchTotalLogsToMigrate()
+            return MigrationStatus(
+                needsMigration: needsMigration > 0,
+                logsNeedingMigration: needsMigration,
+                lastRunDate: lastRunDate
+            )
         } catch {
             print("❌ Error checking migration status: \(error.localizedDescription)")
-            return (total: 0, migrated: 0)
+            return MigrationStatus(needsMigration: false, logsNeedingMigration: 0, lastRunDate: lastRunDate)
         }
     }
-    
-    /// Quick migration for current user only (for testing)
-    func migrateCurrentUserLogs() async {
-        guard let userId = Auth.auth().currentUser?.uid else { return }
-        
-        isMigrating = true
-        migrationStatus = "Migrating your logs..."
-        
-        let db = Firestore.firestore()
-        
-        do {
-            let snapshot = try await db.collection("logs")
-                .whereField("userId", isEqualTo: userId)
-                .whereField("universalTrackId", isEqualTo: NSNull())
-                .whereField("itemType", isEqualTo: "song")
-                .limit(to: 50)
-                .getDocuments()
-            
-            totalCount = snapshot.documents.count
-            migratedCount = 0
-            
-            for document in snapshot.documents {
-                if let log = try? document.data(as: MusicLog.self) {
-                    await migrateSingleLog(log, document: document)
-                    migratedCount += 1
-                    migrationProgress = Double(migratedCount) / Double(totalCount)
-                }
-            }
-            
-            migrationStatus = "Your logs migrated successfully!"
-            
-        } catch {
-            migrationStatus = "Migration failed: \(error.localizedDescription)"
-        }
-        
-        isMigrating = false
-    }
+}
+
+// MARK: - Supporting Types
+
+struct MigrationStatus {
+    let needsMigration: Bool
+    let logsNeedingMigration: Int
+    let lastRunDate: Date?
 }

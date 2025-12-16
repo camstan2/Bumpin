@@ -1,9 +1,10 @@
 import Foundation
 import SwiftUI
+import FirebaseAuth
+import FirebaseFirestore
 
 // MARK: - Spotify Web API Service
 
-@MainActor
 class SpotifyService: ObservableObject {
     
     // MARK: - Spotify Models
@@ -97,6 +98,14 @@ class SpotifyService: ObservableObject {
         }
     }
     
+    struct SpotifyTokenResponse: Codable {
+        let access_token: String
+        let token_type: String
+        let expires_in: Int
+        let refresh_token: String?
+        let scope: String?
+    }
+    
     struct SpotifyPlaylist: Codable {
         let id: String
         let name: String
@@ -135,11 +144,24 @@ class SpotifyService: ObservableObject {
         }
     }
     
+    struct SpotifyPlaylistTracksResponse: Codable {
+        let items: [SpotifyPlaylistTrackItem]
+        let total: Int
+        let limit: Int
+        let offset: Int
+        
+        struct SpotifyPlaylistTrackItem: Codable {
+            let track: SpotifyTrack?
+            let added_at: String
+        }
+    }
+    
     // MARK: - Configuration
     
     private let baseURL = "https://api.spotify.com/v1"
     private let clientId = "1aef1115860843efa62b56eeb45735c1"
-    private let clientSecret = "251f18cdb80445a593681a3b17c37418"
+    // ✅ SECURITY: Client secret moved to Firebase Functions
+    // No longer stored in the app
     
     // MARK: - Authentication
     
@@ -147,9 +169,15 @@ class SpotifyService: ObservableObject {
     @Published var isUserAuthenticated = false
     @Published var accessToken: String?
     @Published var userAccessToken: String?
+    private var userRefreshToken: String?
     private var tokenExpirationDate: Date?
     private var userTokenExpirationDate: Date?
     @Published var currentUser: SpotifyUser?
+    
+    // 🔒 CRITICAL FIX: Serialize token authentication to prevent race conditions
+    private var ongoingAuthTask: Task<Bool, Never>?
+    private var authTaskId: UUID?
+    private let authTaskLock = NSLock()
     
     // MARK: - Singleton
     
@@ -157,20 +185,79 @@ class SpotifyService: ObservableObject {
     
     private init() {
         loadStoredToken()
+        loadStoredUserToken()
     }
     
     // MARK: - Authentication Methods
     
     func authenticateWithClientCredentials() async -> Bool {
+        // 🔒 CRITICAL FIX: Check if token is already valid (fast path, no lock needed)
+        if let token = accessToken,
+           let expiration = tokenExpirationDate,
+           Date() < expiration.addingTimeInterval(-300) {
+            return true
+        }
+        
+        // Lock only for checking/setting the ongoing task
+        authTaskLock.lock()
+        
+        // Double-check token validity while holding lock
+        if let token = accessToken,
+           let expiration = tokenExpirationDate,
+           Date() < expiration.addingTimeInterval(-300) {
+            authTaskLock.unlock()
+            return true
+        }
+        
+        // If authentication is already in progress, wait for it
+        if let existingTask = ongoingAuthTask {
+            let task = existingTask
+            authTaskLock.unlock()
+            print("⏳ Waiting for existing Spotify authentication...")
+            return await task.value
+        }
+        
+        // Start new authentication task (OFF main actor)
+        let taskId = UUID()
+        let newTask = Task<Bool, Never> {
+            await self.performAuthentication()
+        }
+        ongoingAuthTask = newTask
+        authTaskId = taskId
+        authTaskLock.unlock()
+        
+        let result = await newTask.value
+        
+        // Clean up - only clear if this is still the current task
+        authTaskLock.lock()
+        if authTaskId == taskId {
+            ongoingAuthTask = nil
+            authTaskId = nil
+        }
+        authTaskLock.unlock()
+        
+        return result
+    }
+    
+    private func performAuthentication() async -> Bool {
+        print("🔑 Starting Spotify authentication via Firebase Functions...")
         do {
-            let token = try await requestClientCredentialsToken()
+            // ✅ NEW: Call Firebase Function instead of direct Spotify API
+            let tokenResponse = try await FirebaseFunctionsService.shared.getSpotifyClientToken()
             await MainActor.run {
-                self.accessToken = token.access_token
-                self.tokenExpirationDate = Date().addingTimeInterval(TimeInterval(token.expires_in))
+                self.accessToken = tokenResponse.accessToken
+                self.tokenExpirationDate = tokenResponse.expirationDate
                 self.isAuthenticated = true
-                self.saveToken(token)
+                // Save token for caching
+                self.saveToken(SpotifyTokenResponse(
+                    access_token: tokenResponse.accessToken,
+                    token_type: tokenResponse.tokenType,
+                    expires_in: tokenResponse.expiresIn,
+                    refresh_token: nil,
+                    scope: nil
+                ))
             }
-            print("✅ Spotify authentication successful")
+            print("✅ Spotify authentication successful via Firebase Functions")
             return true
         } catch {
             print("❌ Spotify authentication failed: \(error.localizedDescription)")
@@ -181,6 +268,8 @@ class SpotifyService: ObservableObject {
         }
     }
     
+    // OLD METHOD - No longer needed, kept for reference
+    /*
     private func requestClientCredentialsToken() async throws -> SpotifyTokenResponse {
         let url = URL(string: "https://accounts.spotify.com/api/token")!
         var request = URLRequest(url: url)
@@ -203,20 +292,11 @@ class SpotifyService: ObservableObject {
         
         return try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
     }
-    
-    struct SpotifyTokenResponse: Codable {
-        let access_token: String
-        let token_type: String
-        let expires_in: Int
-        let refresh_token: String?
-    }
+    */
     
     // MARK: - User Authentication Methods
     
     func authenticateUser() async -> Bool {
-        // For now, we'll use a simplified approach with Safari
-        // In production, you'd implement full OAuth flow
-        
         guard let authURL = buildAuthURL() else {
             print("❌ Failed to build Spotify auth URL")
             return false
@@ -232,9 +312,10 @@ class SpotifyService: ObservableObject {
             }
         }
         
-        // For demo purposes, simulate successful authentication
-        // In production, you'd handle the callback and exchange code for token
-        return await simulateUserAuth()
+        // The actual authentication will be handled by the OAuth callback
+        // We'll return true here to indicate the auth process has started
+        // The real authentication status will be updated in handleOAuthCallback
+        return true
     }
     
     private func buildAuthURL() -> URL? {
@@ -271,86 +352,386 @@ class SpotifyService: ObservableObject {
         return true
     }
     
-    // MARK: - Search Methods
+    // MARK: - OAuth Callback Handler
     
-    func searchTracks(query: String, limit: Int = 25) async -> [SpotifyTrack] {
-        guard await ensureValidToken() else {
-            print("❌ No valid Spotify token for search")
-            return []
+    func handleOAuthCallback(url: URL) async {
+        print("🔗 Handling Spotify OAuth callback: \(url)")
+        
+        // Parse the authorization code from the URL
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems,
+              let code = queryItems.first(where: { $0.name == "code" })?.value else {
+            print("❌ No authorization code found in callback URL")
+            return
         }
         
-        guard let accessToken = accessToken else { return [] }
+        print("✅ Authorization code received: \(code.prefix(10))...")
+        
+        // Exchange authorization code for access token
+        await exchangeCodeForToken(authorizationCode: code)
+    }
+    
+    private func exchangeCodeForToken(authorizationCode: String) async {
+        print("🔑 Exchanging authorization code for token via Firebase Functions...")
         
         do {
-            let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-            let urlString = "\(baseURL)/search?q=\(encodedQuery)&type=track&limit=\(limit)"
+            // ✅ NEW: Call Firebase Function instead of direct Spotify API
+            let redirectURI = "bumpin://spotify-callback"
+            let tokenResponse = try await FirebaseFunctionsService.shared.exchangeSpotifyCode(
+                code: authorizationCode,
+                redirectUri: redirectURI
+            )
             
-            guard let url = URL(string: urlString) else { return [] }
+            await MainActor.run {
+                self.isUserAuthenticated = true
+                self.userAccessToken = tokenResponse.accessToken
+                self.userRefreshToken = tokenResponse.refreshToken
+                self.userTokenExpirationDate = tokenResponse.expirationDate
+            }
             
+            // Save user token for persistence
+            saveUserToken(SpotifyTokenResponse(
+                access_token: tokenResponse.accessToken,
+                token_type: tokenResponse.tokenType,
+                expires_in: tokenResponse.expiresIn,
+                refresh_token: tokenResponse.refreshToken,
+                scope: nil
+            ))
+            
+            print("✅ Spotify user authentication successful via Firebase Functions!")
+            
+            // Load user profile
+            await loadUserProfile()
+            
+        } catch {
+            print("❌ Token exchange error: \(error.localizedDescription)")
+        }
+    }
+    
+    // OLD METHOD - No longer needed
+    /*
+    private func exchangeCodeForToken(authorizationCode: String) async {
+        guard let tokenURL = URL(string: "https://accounts.spotify.com/api/token") else {
+            print("❌ Invalid token URL")
+            return
+        }
+        
+        var request = URLRequest(url: tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        
+        // Create the request body
+        let redirectURI = "bumpin://spotify-callback"
+        let bodyString = "grant_type=authorization_code&code=\(authorizationCode)&redirect_uri=\(redirectURI)&client_id=\(clientId)&client_secret=\(clientSecret)"
+        request.httpBody = bodyString.data(using: .utf8)
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                print("🔑 Token exchange response status: \(httpResponse.statusCode)")
+                
+                if httpResponse.statusCode == 200 {
+                    let tokenResponse = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+                    
+                    await MainActor.run {
+                        self.isUserAuthenticated = true
+                        self.userAccessToken = tokenResponse.access_token
+                        self.userRefreshToken = tokenResponse.refresh_token
+                        self.userTokenExpirationDate = Date().addingTimeInterval(TimeInterval(tokenResponse.expires_in))
+                    }
+                    
+                    // Save user token for persistence
+                    saveUserToken(tokenResponse)
+                    
+                    print("✅ Spotify authentication successful!")
+                    
+                    // Load user profile
+                    await loadUserProfile()
+                    
+                } else {
+                    print("❌ Token exchange failed with status: \(httpResponse.statusCode)")
+                    if let errorData = String(data: data, encoding: .utf8) {
+                        print("Error details: \(errorData)")
+                    }
+                }
+            }
+        } catch {
+            print("❌ Token exchange error: \(error.localizedDescription)")
+        }
+    }
+    */
+    
+    private func loadUserProfile() async {
+        guard let accessToken = userAccessToken else { return }
+        
+        do {
+            let url = URL(string: "\(baseURL)/me")!
             var request = URLRequest(url: url)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
             
             let (data, response) = try await URLSession.shared.data(for: request)
             
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                let user = try JSONDecoder().decode(SpotifyUser.self, from: data)
+                
+                await MainActor.run {
+                    self.currentUser = user
+                }
+                
+                // Save user profile
+                if let userData = try? JSONEncoder().encode(user) {
+                    UserDefaults.standard.set(userData, forKey: "spotify_user_profile")
+                }
+                
+                print("✅ User profile loaded: \(user.display_name ?? "Unknown")")
+            }
+        } catch {
+            print("❌ Failed to load user profile: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - Token Management
+    
+    private func ensureUserTokenValid() async -> Bool {
+        guard let token = userAccessToken,
+              let expiration = userTokenExpirationDate else {
+            return false
+        }
+        
+        // Check if token is expired or will expire in the next 5 minutes
+        if expiration.timeIntervalSinceNow < 300 {
+            print("🔄 User token expired, refreshing...")
+            return await refreshUserToken()
+        }
+        
+        return true
+    }
+    
+    private func refreshUserToken() async -> Bool {
+        guard let refreshToken = userRefreshToken else {
+            print("❌ No refresh token available")
+            return false
+        }
+        
+        print("🔄 Refreshing user token via Firebase Functions...")
+        
+        do {
+            // ✅ NEW: Call Firebase Function instead of direct Spotify API
+            let tokenResponse = try await FirebaseFunctionsService.shared.refreshSpotifyToken(
+                refreshToken: refreshToken
+            )
+            
+            await MainActor.run {
+                self.userAccessToken = tokenResponse.accessToken
+                // Keep existing refresh token if not returned
+                self.userTokenExpirationDate = tokenResponse.expirationDate
+            }
+            
+            // Save refreshed token
+            saveUserToken(SpotifyTokenResponse(
+                access_token: tokenResponse.accessToken,
+                token_type: tokenResponse.tokenType,
+                expires_in: tokenResponse.expiresIn,
+                refresh_token: refreshToken, // Keep existing refresh token
+                scope: nil
+            ))
+            
+            print("✅ User token refreshed successfully via Firebase Functions")
+            return true
+            
+        } catch {
+            print("❌ Token refresh failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+    
+    // OLD METHOD - No longer needed
+    /*
+    private func refreshUserToken() async -> Bool {
+        guard let refreshToken = userRefreshToken else {
+            print("❌ No refresh token available")
+            return false
+        }
+        
+        guard let tokenURL = URL(string: "https://accounts.spotify.com/api/token") else {
+            return false
+        }
+        
+        var request = URLRequest(url: tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        
+        let bodyString = "grant_type=refresh_token&refresh_token=\(refreshToken)&client_id=\(clientId)&client_secret=\(clientSecret)"
+        request.httpBody = bodyString.data(using: .utf8)
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                let tokenResponse = try JSONDecoder().decode(SpotifyTokenResponse.self, from: data)
+                
+                await MainActor.run {
+                    self.userAccessToken = tokenResponse.access_token
+                    if let refreshToken = tokenResponse.refresh_token {
+                        self.userRefreshToken = refreshToken
+                    }
+                    self.userTokenExpirationDate = Date().addingTimeInterval(TimeInterval(tokenResponse.expires_in))
+                }
+                
+                // Save refreshed token
+                saveUserToken(tokenResponse)
+                
+                print("✅ User token refreshed successfully")
+                return true
+            }
+        } catch {
+            print("❌ Token refresh failed: \(error.localizedDescription)")
+        }
+        
+        return false
+    }
+    */
+    
+    // MARK: - Search Methods
+    
+    func searchTracks(query: String, limit: Int = 25) async -> [SpotifyTrack] {
+        print("🔍 [Spotify] Starting track search for: \(query)")
+        
+        guard await ensureValidToken() else {
+            print("❌ [Spotify] No valid Spotify token for search")
+            return []
+        }
+        
+        guard let accessToken = accessToken else {
+            print("❌ [Spotify] No access token available")
+            return []
+        }
+        
+        do {
+            let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let urlString = "\(baseURL)/search?q=\(encodedQuery)&type=track&limit=\(limit)"
+            
+            guard let url = URL(string: urlString) else {
+                print("❌ [Spotify] Invalid URL for track search")
+                return []
+            }
+            
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = 10.0 // 10 second timeout
+            
+            print("🌐 [Spotify] Making track search request...")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            print("✅ [Spotify] Track search request completed")
+            
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                print("❌ Spotify search failed with status: \(httpResponse.statusCode)")
+                print("❌ [Spotify] Track search failed with status: \(httpResponse.statusCode)")
                 return []
             }
             
             let searchResponse = try JSONDecoder().decode(SpotifySearchResponse.self, from: data)
             let tracks = searchResponse.tracks?.items ?? []
             
-            print("🎵 Spotify search found \(tracks.count) tracks for: \(query)")
+            print("✅ [Spotify] Track search found \(tracks.count) tracks for: \(query)")
             return tracks
             
         } catch {
-            print("❌ Spotify search error: \(error.localizedDescription)")
+            print("❌ [Spotify] Track search error: \(error.localizedDescription)")
             return []
         }
     }
     
     func searchArtists(query: String, limit: Int = 25) async -> [SpotifyArtist] {
-        guard await ensureValidToken() else { return [] }
-        guard let accessToken = accessToken else { return [] }
+        print("🔍 [Spotify] Starting artist search for: \(query)")
+        
+        guard await ensureValidToken() else {
+            print("❌ [Spotify] No valid token for artist search")
+            return []
+        }
+        
+        guard let accessToken = accessToken else {
+            print("❌ [Spotify] No access token for artist search")
+            return []
+        }
         
         do {
             let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             let urlString = "\(baseURL)/search?q=\(encodedQuery)&type=artist&limit=\(limit)"
             
-            guard let url = URL(string: urlString) else { return [] }
+            guard let url = URL(string: urlString) else {
+                print("❌ [Spotify] Invalid URL for artist search")
+                return []
+            }
             
             var request = URLRequest(url: url)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = 10.0 // 10 second timeout
             
-            let (data, _) = try await URLSession.shared.data(for: request)
+            print("🌐 [Spotify] Making artist search request...")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            print("✅ [Spotify] Artist search request completed")
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                print("❌ [Spotify] Artist search failed with status: \(httpResponse.statusCode)")
+                return []
+            }
+            
             let searchResponse = try JSONDecoder().decode(SpotifySearchResponse.self, from: data)
+            let artists = searchResponse.artists?.items ?? []
             
-            return searchResponse.artists?.items ?? []
+            print("✅ [Spotify] Artist search found \(artists.count) artists for: \(query)")
+            return artists
+            
         } catch {
-            print("❌ Spotify artist search error: \(error.localizedDescription)")
+            print("❌ [Spotify] Artist search error: \(error.localizedDescription)")
             return []
         }
     }
     
     func searchAlbums(query: String, limit: Int = 25) async -> [SpotifyAlbum] {
-        guard await ensureValidToken() else { return [] }
-        guard let accessToken = accessToken else { return [] }
+        print("🔍 [Spotify] Starting album search for: \(query)")
+        
+        guard await ensureValidToken() else {
+            print("❌ [Spotify] No valid token for album search")
+            return []
+        }
+        
+        guard let accessToken = accessToken else {
+            print("❌ [Spotify] No access token for album search")
+            return []
+        }
         
         do {
             let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             let urlString = "\(baseURL)/search?q=\(encodedQuery)&type=album&limit=\(limit)"
             
-            guard let url = URL(string: urlString) else { return [] }
+            guard let url = URL(string: urlString) else {
+                print("❌ [Spotify] Invalid URL for album search")
+                return []
+            }
             
             var request = URLRequest(url: url)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = 10.0 // 10 second timeout
             
-            let (data, _) = try await URLSession.shared.data(for: request)
+            print("🌐 [Spotify] Making album search request...")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            print("✅ [Spotify] Album search request completed")
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                print("❌ [Spotify] Album search failed with status: \(httpResponse.statusCode)")
+                return []
+            }
+            
             let searchResponse = try JSONDecoder().decode(SpotifySearchResponse.self, from: data)
+            let albums = searchResponse.albums?.items ?? []
             
-            return searchResponse.albums?.items ?? []
+            print("✅ [Spotify] Album search found \(albums.count) albums for: \(query)")
+            return albums
+            
         } catch {
-            print("❌ Spotify album search error: \(error.localizedDescription)")
+            print("❌ [Spotify] Album search error: \(error.localizedDescription)")
             return []
         }
     }
@@ -386,9 +767,101 @@ class SpotifyService: ObservableObject {
         }
     }
     
+    // MARK: - User Token Persistence
+    
+    private func loadStoredUserToken() {
+        // Load user access token
+        if let userToken = UserDefaults.standard.string(forKey: "spotify_user_access_token"),
+           let userRefreshToken = UserDefaults.standard.string(forKey: "spotify_user_refresh_token"),
+           let expirationData = UserDefaults.standard.object(forKey: "spotify_user_token_expiration") as? Date {
+            
+            self.userAccessToken = userToken
+            self.userRefreshToken = userRefreshToken
+            self.userTokenExpirationDate = expirationData
+            self.isUserAuthenticated = true
+            
+            print("✅ Loaded stored Spotify user token (expires: \(expirationData))")
+            
+            // Load user profile if available
+            if let userData = UserDefaults.standard.data(forKey: "spotify_user_profile"),
+               let user = try? JSONDecoder().decode(SpotifyUser.self, from: userData) {
+                self.currentUser = user
+                print("✅ Loaded stored user profile: \(user.display_name ?? "Unknown")")
+            }
+        }
+    }
+    
+    private func saveUserToken(_ token: SpotifyTokenResponse) {
+        UserDefaults.standard.set(token.access_token, forKey: "spotify_user_access_token")
+        if let refreshToken = token.refresh_token {
+            UserDefaults.standard.set(refreshToken, forKey: "spotify_user_refresh_token")
+        }
+        if let expiration = userTokenExpirationDate {
+            UserDefaults.standard.set(expiration, forKey: "spotify_user_token_expiration")
+        }
+        
+        // Save user profile if available
+        if let user = currentUser, let userData = try? JSONEncoder().encode(user) {
+            UserDefaults.standard.set(userData, forKey: "spotify_user_profile")
+        }
+        
+        print("💾 Saved Spotify user token to UserDefaults")
+    }
+    
+    // MARK: - Connection Management
+    
+    @MainActor
+    func disconnectSpotifySearch() {
+        print("🔌 Disconnecting Spotify search authentication…")
+        accessToken = nil
+        tokenExpirationDate = nil
+        isAuthenticated = false
+        UserDefaults.standard.removeObject(forKey: "spotify_token")
+        UserDefaults.standard.removeObject(forKey: "spotify_token_expiration")
+        print("✅ Spotify search disconnected")
+    }
+    
+    @MainActor
+    func disconnectSpotifyLibrary(removeRemoteData: Bool = true) async {
+        print("🔌 Disconnecting Spotify library authentication…")
+        userAccessToken = nil
+        userRefreshToken = nil
+        userTokenExpirationDate = nil
+        currentUser = nil
+        isUserAuthenticated = false
+        
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "spotify_user_access_token")
+        defaults.removeObject(forKey: "spotify_user_refresh_token")
+        defaults.removeObject(forKey: "spotify_user_token_expiration")
+        defaults.removeObject(forKey: "spotify_user_profile")
+        
+        if removeRemoteData, let uid = Auth.auth().currentUser?.uid {
+            let docRef = Firestore.firestore()
+                .collection("users")
+                .document(uid)
+                .collection("private")
+                .document("spotify")
+            do {
+                try await docRef.delete()
+                print("🗑️ Removed stored Spotify refresh token from Firestore")
+            } catch {
+                print("⚠️ Failed to delete Spotify refresh token doc: \(error.localizedDescription)")
+            }
+        }
+        
+        print("✅ Spotify library disconnected")
+    }
+    
+    @MainActor
+    func disconnectAllSpotify() async {
+        disconnectSpotifySearch()
+        await disconnectSpotifyLibrary()
+    }
+    
     // MARK: - Conversion to Universal Format
     
-    func convertToMusicSearchResult(_ spotifyTrack: SpotifyTrack) -> MusicSearchResult {
+    func convertToMusicSearchResult(_ spotifyTrack: SpotifyTrack, platform: String = "spotify") -> MusicSearchResult {
         return MusicSearchResult(
             id: spotifyTrack.id,
             title: spotifyTrack.name,
@@ -398,11 +871,12 @@ class SpotifyService: ObservableObject {
             itemType: "song",
             popularity: spotifyTrack.popularity,
             genreNames: spotifyTrack.artists.first?.genres,
-            primaryGenre: spotifyTrack.artists.first?.genres?.first
+            primaryGenre: spotifyTrack.artists.first?.genres?.first,
+            platform: platform
         )
     }
     
-    func convertToMusicSearchResult(_ spotifyArtist: SpotifyArtist) -> MusicSearchResult {
+    func convertToMusicSearchResult(_ spotifyArtist: SpotifyArtist, platform: String = "spotify") -> MusicSearchResult {
         return MusicSearchResult(
             id: spotifyArtist.id,
             title: spotifyArtist.name,
@@ -412,11 +886,12 @@ class SpotifyService: ObservableObject {
             itemType: "artist",
             popularity: spotifyArtist.popularity ?? 0,
             genreNames: spotifyArtist.genres,
-            primaryGenre: spotifyArtist.genres?.first
+            primaryGenre: spotifyArtist.genres?.first,
+            platform: platform
         )
     }
     
-    func convertToMusicSearchResult(_ spotifyAlbum: SpotifyAlbum) -> MusicSearchResult {
+    func convertToMusicSearchResult(_ spotifyAlbum: SpotifyAlbum, platform: String = "spotify") -> MusicSearchResult {
         return MusicSearchResult(
             id: spotifyAlbum.id,
             title: spotifyAlbum.name,
@@ -426,15 +901,26 @@ class SpotifyService: ObservableObject {
             itemType: "album",
             popularity: 0,
             genreNames: spotifyAlbum.artists.first?.genres,
-            primaryGenre: spotifyAlbum.artists.first?.genres?.first
+            primaryGenre: spotifyAlbum.artists.first?.genres?.first,
+            platform: platform
         )
     }
     
     // MARK: - User Library Methods
     
     func getUserPlaylists(limit: Int = 50) async -> [SpotifyPlaylist] {
-        guard isUserAuthenticated, let userToken = userAccessToken else {
+        guard isUserAuthenticated else {
             print("❌ User not authenticated for Spotify library access")
+            return []
+        }
+        
+        guard await ensureUserTokenValid() else {
+            print("❌ Invalid user token for Spotify library access")
+            return []
+        }
+        
+        guard let userToken = userAccessToken else {
+            print("❌ No user access token available")
             return []
         }
         
@@ -447,11 +933,17 @@ class SpotifyService: ObservableObject {
             var request = URLRequest(url: urlComponents.url!)
             request.setValue("Bearer \(userToken)", forHTTPHeaderField: "Authorization")
             
-            let (data, _) = try await URLSession.shared.data(for: request)
-            let response = try JSONDecoder().decode(SpotifyPlaylistsResponse.self, from: data)
+            let (data, response) = try await URLSession.shared.data(for: request)
             
-            print("🎵 Found \(response.items.count) Spotify playlists")
-            return response.items
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                print("❌ Failed to fetch playlists: \(httpResponse.statusCode)")
+                return []
+            }
+            
+            let playlistsResponse = try JSONDecoder().decode(SpotifyPlaylistsResponse.self, from: data)
+            
+            print("🎵 Found \(playlistsResponse.items.count) Spotify playlists")
+            return playlistsResponse.items
             
         } catch {
             print("❌ Error fetching Spotify playlists: \(error)")
@@ -460,8 +952,18 @@ class SpotifyService: ObservableObject {
     }
     
     func getSavedTracks(limit: Int = 50) async -> [SpotifyTrack] {
-        guard isUserAuthenticated, let userToken = userAccessToken else {
+        guard isUserAuthenticated else {
             print("❌ User not authenticated for Spotify library access")
+            return []
+        }
+        
+        guard await ensureUserTokenValid() else {
+            print("❌ Invalid user token for Spotify library access")
+            return []
+        }
+        
+        guard let userToken = userAccessToken else {
+            print("❌ No user access token available")
             return []
         }
         
@@ -474,14 +976,63 @@ class SpotifyService: ObservableObject {
             var request = URLRequest(url: urlComponents.url!)
             request.setValue("Bearer \(userToken)", forHTTPHeaderField: "Authorization")
             
-            let (data, _) = try await URLSession.shared.data(for: request)
-            let response = try JSONDecoder().decode(SpotifySavedTracksResponse.self, from: data)
+            let (data, response) = try await URLSession.shared.data(for: request)
             
-            print("🎵 Found \(response.items.count) saved Spotify tracks")
-            return response.items.map { $0.track }
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                print("❌ Failed to fetch saved tracks: \(httpResponse.statusCode)")
+                return []
+            }
+            
+            let savedTracksResponse = try JSONDecoder().decode(SpotifySavedTracksResponse.self, from: data)
+            
+            print("🎵 Found \(savedTracksResponse.items.count) saved Spotify tracks")
+            return savedTracksResponse.items.map { $0.track }
             
         } catch {
             print("❌ Error fetching saved Spotify tracks: \(error)")
+            return []
+        }
+    }
+    
+    func getPlaylistTracks(playlistId: String, limit: Int = 100) async -> [SpotifyTrack] {
+        guard isUserAuthenticated else {
+            print("❌ User not authenticated for Spotify playlist access")
+            return []
+        }
+        
+        guard await ensureUserTokenValid() else {
+            print("❌ Invalid user token for Spotify playlist access")
+            return []
+        }
+        
+        guard let userToken = userAccessToken else {
+            print("❌ No user access token available")
+            return []
+        }
+        
+        do {
+            var urlComponents = URLComponents(string: "\(baseURL)/playlists/\(playlistId)/tracks")!
+            urlComponents.queryItems = [
+                URLQueryItem(name: "limit", value: String(limit))
+            ]
+            
+            var request = URLRequest(url: urlComponents.url!)
+            request.setValue("Bearer \(userToken)", forHTTPHeaderField: "Authorization")
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                print("❌ Failed to fetch playlist tracks: \(httpResponse.statusCode)")
+                return []
+            }
+            
+            let playlistTracksResponse = try JSONDecoder().decode(SpotifyPlaylistTracksResponse.self, from: data)
+            
+            print("🎵 Found \(playlistTracksResponse.items.count) tracks in playlist")
+            return playlistTracksResponse.items.compactMap { $0.track }
+            
+        } catch {
+            print("❌ Error fetching Spotify playlist tracks: \(error)")
             return []
         }
     }

@@ -5,17 +5,31 @@ import FirebaseFirestore
 struct EnhancedReviewView: View {
     let log: MusicLog
     let showFullDetails: Bool
-    @State private var showingComments = false
+    @State private var showingComments = false // Now navigates to UnifiedLogCommentsView
     @State private var comments: [ReviewComment] = []
     @State private var newCommentText = ""
     @State private var isLoadingComments = false
     @State private var isAddingComment = false
     @State private var friendLikers: [UserLike] = []
     
+    // Engagement state
+    @State private var isLiked: Bool = false
+    @State private var likeCount: Int = 0
+    @State private var hasThumbsDown: Bool = false
+    @State private var hasReposted: Bool = false
+    @State private var repostCount: Int = 0
+    @State private var showActivity = false
+    
+    // Context menu state
+    @State private var showReportSheet = false
+    @State private var showBlockSheet = false
+    @State private var showUserProfile = false
+    @State private var userProfile: UserProfile?
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header with music info and rating
-            HStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
                 // Artwork
                 if let url = log.artworkUrl, let imageUrl = URL(string: url) {
                     AsyncImage(url: imageUrl) { image in
@@ -29,67 +43,50 @@ struct EnhancedReviewView: View {
                     .frame(width: 60, height: 60)
                     .cornerRadius(8)
                 }
-                
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(log.title)
-                        .font(.headline)
-                        .lineLimit(2)
-                    
-                    Text(log.artistName)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    
-                    HStack(spacing: 8) {
-                        // Rating stars (inline editable for owner)
-                        if let uid = Auth.auth().currentUser?.uid, uid == log.userId {
-                            HStack(spacing: 2) {
-                                ForEach(1...5, id: \.self) { star in
-                                    Button(action: { updateRating(star) }) {
-                                        Image(systemName: star <= (log.rating ?? 0) ? "star.fill" : "star")
-                                            .foregroundColor(.yellow)
-                                            .font(.caption)
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                }
-                            }
-                        } else if let rating = log.rating {
-                            HStack(spacing: 2) {
-                                ForEach(1...5, id: \.self) { star in
-                                    Image(systemName: star <= rating ? "star.fill" : "star")
-                                        .foregroundColor(.yellow)
-                                        .font(.caption)
-                                }
-                            }
-                        }
-                        
-                        // Review length indicator
-                        if log.reviewLength != .none {
-                            Text(log.reviewLength.displayText)
-                                .font(.caption2)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(log.reviewLength.color.opacity(0.2))
-                                .foregroundColor(log.reviewLength.color)
-                                .cornerRadius(4)
-                        }
-                        
-                        Spacer()
-                        
-                        // Relative time + privacy badge
-                        HStack(spacing: 6) {
-                            Text(timeAgoString(from: log.dateLogged))
-                                .font(.caption)
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(log.title)
+                                .font(.headline)
+                                .lineLimit(2)
+
+                            Text(log.artistName)
+                                .font(.subheadline)
                                 .foregroundColor(.secondary)
-                            if log.isPublic == false {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "lock.fill").font(.caption2)
-                                    Text("Private").font(.caption2)
+                        }
+                        Spacer()
+                        Text(timeAgoString(from: log.dateLogged))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    HStack(spacing: 8) {
+                        // Rating display with stars
+                        if let rating = log.rating {
+                            // Always show with numeric rating and partial stars
+                            // For owner: make it editable
+                            if let uid = Auth.auth().currentUser?.uid, uid == log.userId {
+                                Button(action: {
+                                    // Could open a rating editor sheet here if needed
+                                    // For now, just display
+                                }) {
+                                    StarRatingDisplayView(rating: rating, starSize: 12, spacing: 2, showNumber: true)
                                 }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.gray.opacity(0.2))
-                                .cornerRadius(6)
+                                .buttonStyle(PlainButtonStyle())
+                            } else {
+                                // For others: display-only with partial stars
+                                StarRatingDisplayView(rating: rating, starSize: 12, spacing: 2, showNumber: true)
                             }
+                        }
+                        Spacer()
+                        if log.isPublic == false {
+                            HStack(spacing: 4) {
+                                Image(systemName: "lock.fill").font(.caption2)
+                                Text("Private").font(.caption2)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.gray.opacity(0.2))
+                            .cornerRadius(6)
                         }
                     }
                 }
@@ -131,148 +128,203 @@ struct EnhancedReviewView: View {
                 }
             }
             
-            // Interaction buttons + friend likers preview
-            HStack(spacing: 20) {
-                // Like button for the review
-                LikeButton(
-                    itemId: log.id,
-                    itemType: .review,
-                    itemTitle: "Review of \(log.title)",
-                    itemArtist: log.artistName,
-                    itemArtworkUrl: log.artworkUrl,
-                    showCount: true
-                )
-                // Friend likers (mutuals) avatar preview
-                if !friendLikers.isEmpty {
-                    HStack(spacing: -8) {
-                        ForEach(friendLikers.prefix(3), id: \.id) { like in
-                            // We don't have username/pfp on UserLike by default; optional future enhancement to denormalize.
-                            // For now, render colored circles as placeholders or fetch minimal profile if needed.
-                            Circle()
-                                .fill(Color.purple.opacity(0.25))
-                                .frame(width: 20, height: 20)
-                                .overlay(
-                                    Text(String(like.userId.prefix(1)).uppercased())
-                                        .font(.caption2)
-                                        .foregroundColor(.purple)
-                                )
-                                .overlay(Circle().stroke(Color.white, lineWidth: 1))
+            // Interaction buttons
+            HStack(spacing: 16) {
+                // Like button
+                Button(action: { 
+                    if isLiked {
+                        LogEngagementHaptics.unlike()
+                    } else {
+                        LogEngagementHaptics.like()
+                    }
+                    toggleLike() 
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: isLiked ? "heart.fill" : "heart")
+                            .symbolEffect(.bounce, value: isLiked)
+                        Text("\(likeCount)")
+                            .contentTransition(.numericText())
+                    }
+                    .font(.caption)
+                    .foregroundColor(isLiked ? .red : .secondary)
+                }
+                .scaleEffect(isLiked ? 1.1 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isLiked)
+                .animation(.smooth, value: likeCount)
+                .buttonStyle(PlainButtonStyle())
+                
+                // Comment button - Navigate to full comment view
+                Button(action: { 
+                    LogEngagementHaptics.comment()
+                    showingComments = true 
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bubble.left")
+                        Text("\(log.commentCount ?? 0)")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                // Thumbs down button
+                Button(action: { 
+                    LogEngagementHaptics.thumbsDown()
+                    toggleThumbsDown() 
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: hasThumbsDown ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                            .symbolEffect(.bounce, value: hasThumbsDown)
+                        if hasThumbsDown {
+                            Text("1")
                         }
                     }
-                    .padding(.leading, 4)
-                    .accessibilityLabel("Friends who liked")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 }
+                .scaleEffect(hasThumbsDown ? 1.1 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: hasThumbsDown)
+                .buttonStyle(PlainButtonStyle())
                 
-                // Helpful/Unhelpful buttons
-                HelpfulVoteButton(logId: log.id)
+                // Repost button
+                Button(action: { 
+                    if hasReposted {
+                        LogEngagementHaptics.unrepost()
+                    } else {
+                        LogEngagementHaptics.repost()
+                    }
+                    handleRepost() 
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.2.squarepath")
+                            .foregroundColor(hasReposted ? .green : .secondary)
+                            .symbolEffect(.bounce, value: hasReposted)
+                        if repostCount > 0 {
+                            Text("\(repostCount)")
+                                .contentTransition(.numericText())
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+                .scaleEffect(hasReposted ? 1.1 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: hasReposted)
+                .animation(.smooth, value: repostCount)
+                .buttonStyle(PlainButtonStyle())
                 
                 Spacer()
                 
-                // Comment button
-                Button(action: { showingComments.toggle() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "bubble.left")
-                            .foregroundColor(.secondary)
-                        if let commentCount = log.commentCount, commentCount > 0 {
-                            Text("\(commentCount)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
+                // View Activity button
+                Button(action: { 
+                    LogEngagementHaptics.viewActivity()
+                    showActivity = true 
+                }) {
+                    Text("View Activity")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.purple)
                 }
-                
-                // Report button (only show for other users' content)
-                if let currentUserId = Auth.auth().currentUser?.uid, currentUserId != log.userId {
-                    ReportButton(
-                        contentId: log.id,
-                        contentType: .musicReview,
-                        reportedUserId: log.userId,
-                        reportedUsername: "User", // You might want to fetch this
-                        contentPreview: log.review
-                    )
-                }
+                .buttonStyle(PlainButtonStyle())
             }
-            .onAppear { loadFriendLikersPreview() }
+            .onAppear {
+                loadEngagement()
+            }
+            .fullScreenCover(isPresented: $showActivity) {
+                LogActivityView(logId: log.id, log: log)
+            }
+            .fullScreenCover(isPresented: $showingComments) {
+                UnifiedLogCommentsView(log: log)
+            }
             
-            // Comments section (if expanded)
-            if showingComments {
-                VStack(alignment: .leading, spacing: 12) {
-                    Divider()
-                    
-                    // Add comment field
-                    HStack(spacing: 8) {
-                        TextField("Add a comment...", text: $newCommentText)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                        
-                        Button(action: addComment) {
-                            if isAddingComment {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            } else {
-                                Text("Post")
-                                    .fontWeight(.semibold)
-                            }
-                        }
-                        .disabled(newCommentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isAddingComment)
-                    }
-                    
-                    // Comments list
-                    if isLoadingComments {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                    } else if comments.isEmpty {
-                        Text("No comments yet. Be the first to comment!")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
-                            .padding()
-                    } else {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(comments) { comment in
-                                CommentView(comment: comment)
-                            }
-                        }
-                    }
-                }
-                .onAppear {
-                    if comments.isEmpty {
-                        loadComments()
-                    }
-                }
-            }
-            // Inline friends' comments preview (limit 2) when not expanded
-            if !showingComments {
-                FriendsCommentsPreview(log: log, maxCount: 2)
-            }
+            // Friends' comments preview (always shown, not just when collapsed)
+            FriendsCommentsPreview(log: log, maxCount: 2)
         }
         .padding()
         .background(Color(.systemBackground))
         .cornerRadius(16)
         .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
+        .contextMenu {
+            Button {
+                showReportSheet = true
+            } label: {
+                Label("Report", systemImage: "flag")
+            }
+        }
+        .onAppear {
+            loadUserProfileForContextMenu()
+        }
+        .fullScreenCover(isPresented: $showUserProfile) {
+            NavigationView {
+                UserProfileView(userId: log.userId)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Back") {
+                                showUserProfile = false
+                            }
+                            .foregroundColor(.purple)
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showReportSheet) {
+            ReportContentView(
+                contentId: log.id,
+                contentType: .musicReview,
+                reportedUserId: log.userId,
+                reportedUsername: userProfile?.username ?? "user",
+                contentPreview: log.review
+            )
+        }
+        .sheet(isPresented: $showBlockSheet) {
+            BlockUserView(
+                userId: log.userId,
+                username: userProfile?.username ?? "user",
+                profilePictureUrl: userProfile?.profilePictureUrl
+            )
+        }
+    }
+    
+    // MARK: - Load User Profile for Context Menu
+    private func loadUserProfileForContextMenu() {
+        guard userProfile == nil else { return }
+        Task {
+            let db = Firestore.firestore()
+            do {
+                let doc = try await db.collection("users").document(log.userId).getDocument()
+                if let profile = try? doc.data(as: UserProfile.self) {
+                    await MainActor.run {
+                        self.userProfile = profile
+                    }
+                }
+            } catch {
+                print("❌ Error loading user profile: \(error)")
+            }
+        }
     }
     
     // MARK: - Relative Time Formatting
     private func timeAgoString(from date: Date) -> String {
-        let now = Date()
-        let seconds = max(0, Int(now.timeIntervalSince(date)))
-        if seconds < 60 { return "Just now" }
-        let minutes = seconds / 60
-        if minutes < 60 { return minutes == 1 ? "1 minute ago" : "\(minutes) minutes ago" }
-        let hours = minutes / 60
-        if hours < 24 { return hours == 1 ? "1 hour ago" : "\(hours) hours ago" }
-        let days = hours / 24
-        if days < 7 { return days == 1 ? "1 day ago" : "\(days) days ago" }
-        if days == 7 { return "One week ago" }
-
-        let calendar = Calendar.current
-        let yearOfDate = calendar.component(.year, from: date)
-        let yearNow = calendar.component(.year, from: now)
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        formatter.doesRelativeDateFormatting = false
-        formatter.dateFormat = yearOfDate == yearNow ? "MMMM d" : "MMMM d, yyyy"
-        return formatter.string(from: date)
+        let interval = Date().timeIntervalSince(date)
+        
+        if interval < 60 {
+            return "Just now"
+        } else if interval < 3600 {
+            let minutes = Int(interval / 60)
+            return "\(minutes)m"
+        } else if interval < 86400 {
+            let hours = Int(interval / 3600)
+            return "\(hours)h"
+        } else if interval < 604800 { // Less than 7 days
+            let days = Int(interval / 86400)
+            return "\(days)d"
+        } else if interval < 2592000 { // Less than 30 days
+            let weeks = Int(interval / 604800)
+            return "\(weeks)w"
+        } else {
+            let months = Int(interval / 2592000)
+            return "\(months)mo"
+        }
     }
     
     private func loadFriendLikersPreview() {
@@ -308,22 +360,23 @@ struct EnhancedReviewView: View {
     }
     
     private func addComment() {
-        guard let currentUser = Auth.auth().currentUser,
-              !newCommentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let trimmed = newCommentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         
         isAddingComment = true
         
-        // Get user profile info for the comment
-        Firestore.firestore().collection("users").document(currentUser.uid).getDocument { snapshot, error in
-            let username = snapshot?.data()?["username"] as? String ?? "Unknown User"
-            let profilePictureUrl = snapshot?.data()?["profilePictureUrl"] as? String
+        Task {
+            guard let context = await ReviewComment.currentUserContext() else {
+                await MainActor.run { isAddingComment = false }
+                return
+            }
             
             let comment = ReviewComment(
                 logId: log.id,
-                userId: currentUser.uid,
-                username: username,
-                userProfilePictureUrl: profilePictureUrl,
-                text: newCommentText.trimmingCharacters(in: .whitespacesAndNewlines)
+                userId: context.userId,
+                username: context.username,
+                userProfilePictureUrl: context.profilePictureUrl,
+                text: trimmed
             )
             
             ReviewComment.addComment(comment) { error in
@@ -333,7 +386,7 @@ struct EnhancedReviewView: View {
                         print("Error adding comment: \(error)")
                     } else {
                         newCommentText = ""
-                        loadComments() // Refresh comments
+                        loadComments()
                     }
                 }
             }
@@ -341,11 +394,184 @@ struct EnhancedReviewView: View {
     }
 
     // Quick inline rating update
-    private func updateRating(_ newValue: Int) {
+    private func updateRating(_ newValue: Double) {
         guard Auth.auth().currentUser?.uid == log.userId else { return }
         var updated = log
         updated.rating = newValue
         MusicLog.updateLog(updated) { _ in }
+    }
+    
+    // MARK: - Engagement Actions
+    
+    private func loadEngagement() {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        likeCount = log.likeCount ?? 0
+        repostCount = log.repostCount ?? 0
+        
+        Task {
+            let engagement = await LogEngagementCache.shared.getEngagement(logId: log.id, userId: currentUserId)
+            await MainActor.run {
+                isLiked = engagement.isLiked
+                hasThumbsDown = engagement.hasThumbsDown
+                hasReposted = engagement.hasReposted
+            }
+        }
+    }
+    
+    private func toggleLike() {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        Task {
+            let db = Firestore.firestore()
+            let likeRef = db.collection("logs").document(log.id).collection("likes").document(currentUserId)
+            
+            do {
+                if isLiked {
+                    try await likeRef.delete()
+                    try await db.collection("logs").document(log.id).updateData([
+                        "likeCount": FieldValue.increment(Int64(-1))
+                    ])
+                    
+                    await MainActor.run {
+                        isLiked = false
+                        likeCount -= 1
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: false)
+                    }
+                } else {
+                    try await likeRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    try await db.collection("logs").document(log.id).updateData([
+                        "likeCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    // Create like notification
+                    await NotificationService.shared.createLikeNotification(
+                        logId: log.id,
+                        logOwnerId: log.userId,
+                        log: log
+                    )
+                    
+                    await MainActor.run {
+                        isLiked = true
+                        likeCount += 1
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: true)
+                    }
+                }
+            } catch {
+                print("❌ Error toggling like: \(error)")
+            }
+        }
+    }
+    
+    private func toggleThumbsDown() {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        print("🔍 toggleThumbsDown called - current state: \(hasThumbsDown)")
+        
+        Task {
+            let db = Firestore.firestore()
+            let thumbsDownRef = db.collection("logs").document(log.id).collection("thumbsDown").document(currentUserId)
+            
+            do {
+                if hasThumbsDown {
+                    print("🔍 Deleting thumbs down...")
+                    try await thumbsDownRef.delete()
+                    
+                    // ✅ Decrement the thumbs down count on the log
+                    try await db.collection("logs").document(log.id).updateData([
+                        "thumbsDownCount": FieldValue.increment(Int64(-1))
+                    ])
+                    
+                    await MainActor.run {
+                        hasThumbsDown = false
+                        print("✅ Thumbs down removed - new state: \(hasThumbsDown)")
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, hasThumbsDown: false)
+                    }
+                } else {
+                    print("🔍 Adding thumbs down...")
+                    try await thumbsDownRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    
+                    // ✅ Increment the thumbs down count on the log
+                    try await db.collection("logs").document(log.id).updateData([
+                        "thumbsDownCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    // Create dislike notification
+                    await NotificationService.shared.createDislikeNotification(
+                        logId: log.id,
+                        logOwnerId: log.userId,
+                        log: log
+                    )
+                    
+                    await MainActor.run {
+                        hasThumbsDown = true
+                        print("✅ Thumbs down added - new state: \(hasThumbsDown)")
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, hasThumbsDown: true)
+                    }
+                }
+            } catch {
+                print("❌ Error toggling thumbs down: \(error)")
+            }
+        }
+    }
+    
+    private func handleRepost() {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        print("🔍 handleRepost called - current state: hasReposted=\(hasReposted), count=\(repostCount)")
+        
+        Task {
+            let db = Firestore.firestore()
+            let repostRef = db.collection("logs").document(log.id).collection("reposts").document(currentUserId)
+            
+            do {
+                if hasReposted {
+                    print("🔍 Deleting repost...")
+                    try await repostRef.delete()
+                    try await db.collection("logs").document(log.id).updateData([
+                        "repostCount": FieldValue.increment(Int64(-1))
+                    ])
+                    
+                    await MainActor.run {
+                        hasReposted = false
+                        repostCount = max(0, repostCount - 1)
+                        print("✅ Repost removed - new state: hasReposted=\(hasReposted), count=\(repostCount)")
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, hasReposted: false)
+                    }
+                } else {
+                    print("🔍 Adding repost...")
+                    try await repostRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    try await db.collection("logs").document(log.id).updateData([
+                        "repostCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    // Create repost notification
+                    await NotificationService.shared.createRepostNotification(
+                        logId: log.id,
+                        logOwnerId: log.userId,
+                        log: log
+                    )
+                    
+                    await MainActor.run {
+                        hasReposted = true
+                        repostCount += 1
+                        print("✅ Repost added - new state: hasReposted=\(hasReposted), count=\(repostCount)")
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, hasReposted: true)
+                    }
+                }
+            } catch {
+                print("❌ Error handling repost: \(error)")
+            }
+        }
     }
 }
 

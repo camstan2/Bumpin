@@ -4,7 +4,6 @@ import MusicKit
 
 // MARK: - Unified Music Search Service
 
-@MainActor
 class UnifiedMusicSearchService: ObservableObject {
     
     // MARK: - Search Results
@@ -43,9 +42,9 @@ class UnifiedMusicSearchService: ObservableObject {
         }
     }
     
-    @Published var platformPreference: MusicPlatformPreference = .appleMusicOnly
-    @Published var isSearching = false
-    @Published var searchError: String?
+    @MainActor @Published var platformPreference: MusicPlatformPreference = .appleMusicOnly
+    @MainActor @Published var isSearching = false
+    @MainActor @Published var searchError: String?
     
     // MARK: - Services
     private let spotifyService = SpotifyService.shared
@@ -54,26 +53,26 @@ class UnifiedMusicSearchService: ObservableObject {
     static let shared = UnifiedMusicSearchService()
     
     private init() {
-        loadPlatformPreference()
+        Task { @MainActor in
+            loadPlatformPreference()
+        }
     }
     
     // MARK: - Unified Search
     
     func search(query: String, limit: Int = 25) async -> UnifiedSearchResults {
-        await MainActor.run {
+        // 🔒 CRITICAL FIX: Don't await MainActor - just fire and forget to avoid blocking
+        Task { @MainActor in
             isSearching = true
             searchError = nil
         }
         
-        defer {
-            Task { @MainActor in
-                isSearching = false
-            }
-        }
-        
         var results = UnifiedSearchResults()
         
-        switch platformPreference {
+        // 🔒 CRITICAL FIX: Read preference safely on MainActor
+        let currentPreference = await MainActor.run { platformPreference }
+        
+        switch currentPreference {
         case .appleMusicOnly:
             results = await searchAppleMusic(query: query, limit: limit)
             
@@ -86,7 +85,12 @@ class UnifiedMusicSearchService: ObservableObject {
             async let spotifyResults = searchSpotify(query: query, limit: limit / 2)
             
             let (apple, spotify) = await (appleResults, spotifyResults)
-            results = mergeSearchResults(apple: apple, spotify: spotify)
+            results = await mergeSearchResults(apple: apple, spotify: spotify, preference: currentPreference)
+        }
+        
+        // 🔒 CRITICAL FIX: Update UI state at the end without blocking
+        Task { @MainActor in
+            isSearching = false
         }
         
         print("🔍 Unified search for '\(query)': \(results.totalResults) total results")
@@ -116,7 +120,8 @@ class UnifiedMusicSearchService: ObservableObject {
                     popularity: 0,
                     // Prefer song-level genre names; fallback to first artist's genres
                     genreNames: (song.genreNames.isEmpty ? song.artists?.first?.genreNames : song.genreNames),
-                    primaryGenre: (song.genreNames.isEmpty ? song.artists?.first?.genreNames?.first : song.genreNames.first)
+                    primaryGenre: (song.genreNames.isEmpty ? song.artists?.first?.genreNames?.first : song.genreNames.first),
+                    platform: "apple_music"
                 )
             }
             
@@ -130,7 +135,8 @@ class UnifiedMusicSearchService: ObservableObject {
                     itemType: "artist",
                     popularity: 0,
                     genreNames: artist.genreNames,
-                    primaryGenre: artist.genreNames?.first
+                    primaryGenre: artist.genreNames?.first,
+                    platform: "apple_music"
                 )
             }
             
@@ -144,7 +150,8 @@ class UnifiedMusicSearchService: ObservableObject {
                     itemType: "album",
                     popularity: 0,
                     genreNames: album.genreNames,
-                    primaryGenre: album.genreNames.first
+                    primaryGenre: album.genreNames.first,
+                    platform: "apple_music"
                 )
             }
             
@@ -174,25 +181,70 @@ class UnifiedMusicSearchService: ObservableObject {
     }
     
     private func searchSpotify(query: String, limit: Int) async -> UnifiedSearchResults {
-        let tracks = await spotifyService.searchTracks(query: query, limit: limit)
-        let artists = await spotifyService.searchArtists(query: query, limit: limit)
-        let albums = await spotifyService.searchAlbums(query: query, limit: limit)
+        // 🔒 CRITICAL FIX: Run searches in parallel with timeout to prevent hanging
+        print("🔍 Starting parallel Spotify searches for: \(query)")
+        
+        // Execute all three searches in parallel with timeouts
+        async let tracksTask = withTimeout(seconds: 10) {
+            await self.spotifyService.searchTracks(query: query, limit: limit)
+        }
+        async let artistsTask = withTimeout(seconds: 10) {
+            await self.spotifyService.searchArtists(query: query, limit: limit)
+        }
+        async let albumsTask = withTimeout(seconds: 10) {
+            await self.spotifyService.searchAlbums(query: query, limit: limit)
+        }
+        
+        // Await all results (with timeout protection)
+        let tracks = await tracksTask ?? []
+        let artists = await artistsTask ?? []
+        let albums = await albumsTask ?? []
+        
+        print("✅ Spotify searches completed: \(tracks.count) tracks, \(artists.count) artists, \(albums.count) albums")
         
         var results = UnifiedSearchResults()
-        results.songs = tracks.map { spotifyService.convertToMusicSearchResult($0) }
-        results.artists = artists.map { spotifyService.convertToMusicSearchResult($0) }
-        results.albums = albums.map { spotifyService.convertToMusicSearchResult($0) }
+        
+        // 🔒 CRITICAL FIX: Remove MainActor.run - these are just data transformations
+        // Convert results directly (no UI work here, just data mapping)
+        results.songs = tracks.map { spotifyService.convertToMusicSearchResult($0, platform: "spotify") }
+        results.artists = artists.map { spotifyService.convertToMusicSearchResult($0, platform: "spotify") }
+        results.albums = albums.map { spotifyService.convertToMusicSearchResult($0, platform: "spotify") }
         
         return results
     }
     
+    // MARK: - Timeout Helper
+    
+    private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async -> T) async -> T? {
+        return await withTaskGroup(of: T?.self) { group in
+            // Add the actual operation
+            group.addTask {
+                return await operation()
+            }
+            
+            // Add timeout task
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            
+            // Return first completed task and cancel the other
+            if let result = await group.next() {
+                group.cancelAll()
+                return result
+            }
+            
+            return nil
+        }
+    }
+    
     // MARK: - Result Merging
     
-    private func mergeSearchResults(apple: UnifiedSearchResults, spotify: UnifiedSearchResults) -> UnifiedSearchResults {
+    private func mergeSearchResults(apple: UnifiedSearchResults, spotify: UnifiedSearchResults, preference: MusicPlatformPreference) -> UnifiedSearchResults {
         var merged = UnifiedSearchResults()
         
         // Combine results based on preference
-        switch platformPreference {
+        switch preference {
         case .appleMusicPrimary:
             merged.songs = apple.songs + spotify.songs
             merged.artists = apple.artists + spotify.artists
@@ -391,12 +443,14 @@ class UnifiedMusicSearchService: ObservableObject {
     
     // MARK: - Platform Preference Management
     
+    @MainActor
     func setPlatformPreference(_ preference: MusicPlatformPreference) {
         platformPreference = preference
         UserDefaults.standard.set(preference.rawValue, forKey: "music_platform_preference")
         print("🎛️ Music platform preference set to: \(preference.displayName)")
     }
     
+    @MainActor
     private func loadPlatformPreference() {
         if let saved = UserDefaults.standard.string(forKey: "music_platform_preference"),
            let preference = MusicPlatformPreference(rawValue: saved) {

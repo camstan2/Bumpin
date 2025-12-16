@@ -3,7 +3,7 @@ import FirebaseAuth
 import FirebaseFirestore
 
 struct SocialFeedView: View {
-    @StateObject private var viewModel = SocialFeedViewModel()
+    @ObservedObject var viewModel: SocialFeedViewModel
     @StateObject private var navigationCoordinator = NavigationCoordinator()
     @State private var unreadCount: Int = 0
     @State private var selectedFilter: SocialFilter = .all
@@ -19,7 +19,7 @@ struct SocialFeedView: View {
     
     private var weeklyPopularSectionHeader: some View {
         HStack {
-            Text("Popular this week").font(.headline).fontWeight(.bold)
+            Text("Community Favorites").font(.headline).fontWeight(.bold)
             Spacer()
             Button(action: { viewModel.showAllWeeklyPopular = true }) {
                 HStack(spacing: 4) { Text("See All"); Image(systemName: "chevron.right") }
@@ -29,31 +29,6 @@ struct SocialFeedView: View {
         }
     }
     
-    
-    @ViewBuilder
-    private var newPostsBanner: some View {
-        if viewModel.hasNewPosts {
-            Button(action: {
-                AnalyticsService.shared.logTap(category: "new_posts_banner", id: "refresh")
-                Task { await viewModel.refreshAllData() }
-                viewModel.acknowledgeNewPosts()
-            }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.clockwise")
-                    Text("New posts available – tap to refresh")
-                        .fontWeight(.semibold)
-                }
-                .font(.subheadline)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color.blue.opacity(0.15))
-                .foregroundColor(.blue)
-                .clipShape(Capsule())
-            }
-            .padding(.horizontal)
-            .onAppear { AnalyticsService.shared.logImpression(category: "new_posts_banner", id: "visible") }
-        }
-    }
     
     @ViewBuilder
     private var mainContent: some View {
@@ -84,7 +59,7 @@ struct SocialFeedView: View {
         if !viewModel.genreWeeklyPopularLogs.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Popular this week").font(.headline).fontWeight(.bold)
+                    Text("Community Favorites").font(.headline).fontWeight(.bold)
                     Spacer()
                     Button(action: { viewModel.showAllGenreWeeklyPopular = true }) {
                         HStack(spacing: 4) { Text("See All"); Image(systemName: "chevron.right") }
@@ -118,70 +93,110 @@ struct SocialFeedView: View {
     
     @ViewBuilder
     private var allTabContent: some View {
-        friendsNowPlayingSection
-        
-        EnhancedTrendingSectionView(
-            title: "Trending Songs",
-            items: Array(viewModel.trendingSongs.prefix(viewModel.trendingDisplayCountSongs)),
-            itemType: .song,
-            isLoading: viewModel.isLoadingTrendingSongs,
-            showFriendPictures: true,
-            friendsData: viewModel.friendsData,
-            onSeeAll: { viewModel.showAllTrendingSongs = true },
-            onNearEnd: { viewModel.increaseTrendingVisible(type: .song) }
-        )
-        
-        EnhancedTrendingSectionView(
-            title: "Trending Artists",
-            items: Array(viewModel.trendingArtists.prefix(viewModel.trendingDisplayCountArtists)),
-            itemType: .artist,
-            isLoading: viewModel.isLoadingTrendingArtists,
-            showFriendPictures: true,
-            friendsData: viewModel.friendsData,
-            onSeeAll: { viewModel.showAllTrendingArtists = true },
-            onNearEnd: { viewModel.increaseTrendingVisible(type: .artist) }
-        )
-        
-        EnhancedTrendingSectionView(
-            title: "Trending Albums",
-            items: Array(viewModel.trendingAlbums.prefix(viewModel.trendingDisplayCountAlbums)),
-            itemType: .album,
-            isLoading: viewModel.isLoadingTrendingAlbums,
-            showFriendPictures: true,
-            friendsData: viewModel.friendsData,
-            onSeeAll: { viewModel.showAllTrendingAlbums = true },
-            onNearEnd: { viewModel.increaseTrendingVisible(type: .album) }
-        )
+        // DESIGN ENHANCEMENT: Variable vertical spacing for better visual density
+        VStack(spacing: 0) {
+            friendsNowPlayingSection
+                .padding(.bottom, 32)
+            
+            EnhancedTrendingSectionView(
+                title: "Trending Songs",
+                items: Array(viewModel.trendingSongs.prefix(viewModel.trendingDisplayCountSongs)),
+                itemType: .song,
+                isLoading: viewModel.isLoadingTrendingSongs,
+                showFriendPictures: false, // Disabled
+                friendsData: viewModel.friendsData,
+                onSeeAll: { viewModel.showAllTrendingSongs = true },
+                onNearEnd: { viewModel.increaseTrendingVisible(type: .song) }
+            )
+            .padding(.bottom, 32)
+            
+            EnhancedTrendingSectionView(
+                title: "Trending Artists",
+                items: Array(viewModel.trendingArtists.prefix(viewModel.trendingDisplayCountArtists)),
+                itemType: .artist,
+                isLoading: viewModel.isLoadingTrendingArtists,
+                showFriendPictures: false, // Disabled
+                friendsData: viewModel.friendsData,
+                onSeeAll: { viewModel.showAllTrendingArtists = true },
+                onNearEnd: { viewModel.increaseTrendingVisible(type: .artist) }
+            )
+            .padding(.bottom, 20) // Reduced spacing for artists section
+            
+            EnhancedTrendingSectionView(
+                title: "Trending Albums",
+                items: Array(viewModel.trendingAlbums.prefix(viewModel.trendingDisplayCountAlbums)),
+                itemType: .album,
+                isLoading: viewModel.isLoadingTrendingAlbums,
+                showFriendPictures: false, // Disabled
+                friendsData: viewModel.friendsData,
+                onSeeAll: { viewModel.showAllTrendingAlbums = true },
+                onNearEnd: { viewModel.increaseTrendingVisible(type: .album) }
+            )
+            .padding(.bottom, 32)
 
-        EnhancedTrendingSectionView(
-            title: "Popular with Friends",
-            items: Array(viewModel.friendsPopularCombined.prefix(10)),
-            itemType: .song,
-            isLoading: false,
-            showFriendPictures: true,
-            friendsData: viewModel.friendsData,
-            onSeeAll: { viewModel.showAllFriendsPopular = true }
-        )
+            EnhancedTrendingSectionView(
+                title: "Trending with Friends",
+                items: Array(viewModel.friendsPopularCombined.prefix(10)),
+                itemType: .song,
+                isLoading: viewModel.isLoadingTrendingSongs,
+                showFriendPictures: false, // Hide overlay circles
+                friendsData: viewModel.friendsData,
+                onSeeAll: { viewModel.showAllFriendsPopular = true }
+            )
+            .padding(.bottom, 32)
 
-        weeklyPopularSection
+            weeklyPopularSection
+        }
     }
     
     @ViewBuilder
     private var friendsNowPlayingSection: some View {
-        if !viewModel.nowPlayingFriends.isEmpty {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Friends listening now").font(.headline).fontWeight(.semibold)
                 Spacer()
                 Button("See All") { viewModel.showAllFriendsNowPlaying = true }
                     .font(.subheadline).foregroundColor(.purple)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
-                    ForEach(viewModel.nowPlayingFriends, id: \.uid) { user in
-                        NowPlayingFriendCard(user: user)
+            
+            if !viewModel.nowPlayingFriends.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 16) {
+                        ForEach(viewModel.nowPlayingFriends, id: \.uid) { user in
+                            NowPlayingFriendCard(user: user)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+                .onAppear {
+                    print("🎵 [AllTab] Showing \(viewModel.nowPlayingFriends.count) friends listening now")
+                    for friend in viewModel.nowPlayingFriends {
+                        print("  - \(friend.displayName): \(friend.nowPlayingSong ?? "nil") by \(friend.nowPlayingArtist ?? "nil")")
                     }
                 }
-                .padding(.horizontal, 4)
+            } else {
+                // DESIGN ENHANCEMENT: Professional empty state
+                VStack(spacing: 12) {
+                    Image(systemName: "headphones.circle")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    
+                    Text("No friends listening right now")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                    
+                    Text("When your friends play music, they'll appear here")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+                .onAppear {
+                    print("🎵 [AllTab] Friends listening now is EMPTY. Total friends: \(viewModel.nowPlayingFriends.count)")
+                }
             }
         }
     }
@@ -327,8 +342,6 @@ struct SocialFeedView: View {
                         
                         // Content area
                         VStack(spacing: 20) {
-                            newPostsBanner
-                            
                             mainContent
                         }
                         .padding(.horizontal, 16)
@@ -357,6 +370,12 @@ struct SocialFeedView: View {
                     .environmentObject(navigationCoordinator)
             }
         }
+        .fullScreenCover(isPresented: $navigationCoordinator.showingUserProfile) {
+            if let userId = navigationCoordinator.selectedUserId {
+                UserProfileView(userId: userId, showDismissButton: true)
+                    .environmentObject(navigationCoordinator)
+            }
+        }
         .onAppear {
             viewModel.loadAllData()
             viewModel.startNewPostsListener()
@@ -375,15 +394,19 @@ struct SocialFeedView: View {
         }
         .fullScreenCover(isPresented: $viewModel.showAllTrendingSongs) {
             TrendingDetailView(items: viewModel.allTrendingSongs, title: "Trending Songs", itemType: .song)
+                .environmentObject(navigationCoordinator)
         }
         .fullScreenCover(isPresented: $viewModel.showAllTrendingArtists) {
             TrendingDetailView(items: viewModel.allTrendingArtists, title: "Trending Artists", itemType: .artist)
+                .environmentObject(navigationCoordinator)
         }
         .fullScreenCover(isPresented: $viewModel.showAllTrendingAlbums) {
             TrendingDetailView(items: viewModel.allTrendingAlbums, title: "Trending Albums", itemType: .album)
+                .environmentObject(navigationCoordinator)
         }
         .fullScreenCover(isPresented: $viewModel.showAllFriendsPopular) {
-            CombinedTrendingDetailView(items: viewModel.allFriendsPopularCombined.isEmpty ? viewModel.friendsPopularCombined : viewModel.allFriendsPopularCombined, title: "Popular with Friends")
+            CombinedTrendingDetailView(items: viewModel.allFriendsPopularCombined.isEmpty ? viewModel.friendsPopularCombined : viewModel.allFriendsPopularCombined, title: "Trending with Friends")
+                .environmentObject(navigationCoordinator)
         }
         .fullScreenCover(isPresented: $viewModel.showAllWeeklyPopular) {
             WeeklyPopularListView(initialLogs: viewModel.weeklyPopularLogs)
@@ -398,7 +421,7 @@ struct SocialFeedView: View {
             FriendsPopularDetailView(initialItems: viewModel.allGenreFriendsPopularSongs.isEmpty ? viewModel.genreFriendsPopularSongs : viewModel.allGenreFriendsPopularSongs)
         }
         .fullScreenCover(isPresented: $viewModel.showAllGenreFriendsPopularCombined) {
-            CombinedTrendingDetailView(items: viewModel.allGenreFriendsPopularCombined.isEmpty ? viewModel.genreFriendsPopularCombined : viewModel.allGenreFriendsPopularCombined, title: "Popular with Friends in \(viewModel.selectedGenre.capitalized)")
+            CombinedTrendingDetailView(items: viewModel.allGenreFriendsPopularCombined.isEmpty ? viewModel.genreFriendsPopularCombined : viewModel.allGenreFriendsPopularCombined, title: "Trending with Friends in \(viewModel.selectedGenre.capitalized)")
         }
         .fullScreenCover(isPresented: $viewModel.showAllGenreArtists) {
             TrendingDetailView(items: viewModel.allGenreTrendingArtists, title: "Trending Artists in \(viewModel.selectedGenre.capitalized)", itemType: .artist)
@@ -466,9 +489,19 @@ enum ExploreSheet: String, CaseIterable, Identifiable {
 struct FilterChips: View {
     @Binding var selected: SocialFilter
     
+    // FEATURE FLAG: Filter available tabs based on feature flags
+    var availableFilters: [SocialFilter] {
+        SocialFilter.allCases.filter { filter in
+            if filter == .explore {
+                return FeatureFlags.showExploreTab
+            }
+            return true
+        }
+    }
+    
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(SocialFilter.allCases) { filter in
+            ForEach(availableFilters) { filter in
                 Button(action: {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selected = filter
@@ -476,14 +509,27 @@ struct FilterChips: View {
                 }) {
                     Text(filter.rawValue)
                         .font(.caption)
-                        .fontWeight(selected == filter ? .semibold : .regular)
+                        .fontWeight(selected == filter ? .bold : .regular)
                         .foregroundColor(selected == filter ? .purple : .primary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .frame(maxWidth: .infinity)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(Color(.systemGray6))
+                                .fill(selected == filter ? Color.purple.opacity(0.12) : Color(.systemGray6))
+                        )
+                        .overlay(
+                            // Bottom indicator line for selected state
+                            VStack {
+                                Spacer()
+                                if selected == filter {
+                                    Rectangle()
+                                        .fill(Color.purple)
+                                        .frame(height: 3)
+                                        .cornerRadius(1.5)
+                                        .padding(.horizontal, 8)
+                                }
+                            }
                         )
                 }
                 .buttonStyle(PlainButtonStyle())
@@ -627,7 +673,8 @@ struct FavoriteGenresView: View {
             
             // Genre content
             if !selectedGenre.isEmpty {
-                VStack(spacing: 24) {
+                // DESIGN ENHANCEMENT: Increased vertical spacing for better visual breathing room (matches All tab)
+                VStack(spacing: 32) {
                     // Friends Listening Now (genre-filtered)
                     genreFriendsNowPlayingSection
                     
@@ -636,7 +683,7 @@ struct FavoriteGenresView: View {
                         items: viewModel.genreTrending,
                         itemType: .song,
                         isLoading: viewModel.isLoadingGenre,
-                        showFriendPictures: true,
+                        showFriendPictures: false, // Disabled
                         friendsData: viewModel.friendsData,
                         onSeeAll: { viewModel.showAllGenre = true }
                     )
@@ -646,7 +693,7 @@ struct FavoriteGenresView: View {
                         items: viewModel.genreTrendingArtists,
                         itemType: .artist,
                         isLoading: viewModel.isLoadingGenreArtists,
-                        showFriendPictures: true,
+                        showFriendPictures: false, // Disabled
                         friendsData: viewModel.friendsData,
                         onSeeAll: { viewModel.showAllGenreArtists = true }
                     )
@@ -656,17 +703,17 @@ struct FavoriteGenresView: View {
                         items: viewModel.genreTrendingAlbums,
                         itemType: .album,
                         isLoading: viewModel.isLoadingGenreAlbums,
-                        showFriendPictures: true,
+                        showFriendPictures: false, // Disabled
                         friendsData: viewModel.friendsData,
                         onSeeAll: { viewModel.showAllGenreAlbums = true }
                     )
 
                     EnhancedTrendingSectionView(
-                        title: "Popular with Friends",
+                        title: "Trending with Friends",
                         items: viewModel.genreFriendsPopularCombined.isEmpty ? viewModel.genreFriendsPopularSongs : viewModel.genreFriendsPopularCombined,
                         itemType: .song,
                         isLoading: false,
-                        showFriendPictures: true,
+                        showFriendPictures: false, // Disabled
                         friendsData: viewModel.friendsData,
                         onSeeAll: {
                             if viewModel.genreFriendsPopularCombined.isEmpty {
@@ -677,13 +724,31 @@ struct FavoriteGenresView: View {
                         }
                     )
                     
-                    // Popular This Week (genre-filtered)
+                    // Community Favorites (genre-filtered)
                     genreWeeklyPopularSection
                 }
             }
         }
         .sheet(isPresented: $genrePreferences.showGenreSettings) {
             GenreSettingsView()
+        }
+        .fullScreenCover(isPresented: $viewModel.showAllFriendsNowPlaying) {
+            FriendsNowPlayingListView(users: viewModel.nowPlayingFriends)
+        }
+        .fullScreenCover(isPresented: $viewModel.showAllGenre) {
+            TrendingDetailView(items: viewModel.allGenreTrending, title: "Trending Songs", itemType: .song)
+        }
+        .fullScreenCover(isPresented: $viewModel.showAllGenreArtists) {
+            TrendingDetailView(items: viewModel.allGenreTrendingArtists, title: "Trending Artists", itemType: .artist)
+        }
+        .fullScreenCover(isPresented: $viewModel.showAllGenreAlbums) {
+            TrendingDetailView(items: viewModel.allGenreTrendingAlbums, title: "Trending Albums", itemType: .album)
+        }
+        .fullScreenCover(isPresented: $viewModel.showAllGenreFriendsPopularCombined) {
+            CombinedTrendingDetailView(items: viewModel.allGenreFriendsPopularCombined.isEmpty ? viewModel.genreFriendsPopularCombined : viewModel.allGenreFriendsPopularCombined, title: "Trending with Friends")
+        }
+        .fullScreenCover(isPresented: $viewModel.showAllGenreWeeklyPopular) {
+            WeeklyPopularListView(initialLogs: viewModel.genreWeeklyPopularLogs)
         }
     }
     
@@ -743,11 +808,25 @@ struct FavoriteGenresView: View {
                     .padding(.horizontal, 4)
                 }
             } else {
-                // Empty state matching the "all" section
-                Text("No friends listening to \(selectedGenre) right now")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .padding(.vertical, 20)
+                // DESIGN ENHANCEMENT: Professional empty state (matches All tab)
+                VStack(spacing: 12) {
+                    Image(systemName: "headphones.circle")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    
+                    Text("No friends listening to \(selectedGenre) right now")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                    
+                    Text("When your friends play \(selectedGenre), they'll appear here")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
             }
         }
     }
@@ -757,7 +836,7 @@ struct FavoriteGenresView: View {
         // Always show the section header, even if empty (matching "all" section behavior)
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Popular this week").font(.headline).fontWeight(.bold)
+                Text("Community Favorites").font(.headline).fontWeight(.bold)
                 Spacer()
                 Button(action: { viewModel.showAllGenreWeeklyPopular = true }) {
                     HStack(spacing: 4) { Text("See All"); Image(systemName: "chevron.right") }
@@ -789,7 +868,7 @@ struct FavoriteGenresView: View {
                 }
             } else {
                 // Empty state matching the "all" section
-                Text("No popular \(selectedGenre) logs this week")
+                Text("No popular \(selectedGenre) logs in the last 3 days")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .padding(.vertical, 20)
@@ -888,16 +967,19 @@ struct FavoriteGenresView: View {
     
     private func loadGenreContent(_ genre: String) {
         Task {
+            let token = await viewModel.prepareGenreLoad(for: genre)
             // Load friends now playing data (needed for genre filtering)
             await viewModel.loadNowPlayingFriendsAsync()
             
             // Load genre-specific data
-            await viewModel.loadGenreTrendingAsync(for: genre)
-            await viewModel.loadGenreTrendingArtistsAsync(for: genre)
-            await viewModel.loadGenreTrendingAlbumsAsync(for: genre)
-            await viewModel.loadGenrePopularFriendsAsync(for: genre)
-            await viewModel.loadGenrePopularFriendsCombinedAsync(for: genre)
-            await viewModel.loadGenreWeeklyPopularAsync(for: genre, reset: true)
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await viewModel.loadGenreTrendingAsync(for: genre, context: token) }
+                group.addTask { await viewModel.loadGenreTrendingArtistsAsync(for: genre, context: token) }
+                group.addTask { await viewModel.loadGenreTrendingAlbumsAsync(for: genre, context: token) }
+                group.addTask { await viewModel.loadGenrePopularFriendsAsync(for: genre, context: token) }
+                group.addTask { await viewModel.loadGenrePopularFriendsCombinedAsync(for: genre, context: token) }
+            }
+            await viewModel.loadGenreWeeklyPopularAsync(for: genre, reset: true, context: token)
         }
         UserDefaults.standard.set(genre, forKey: "selectedGenre")
     }
@@ -992,21 +1074,88 @@ struct GenreSettingsView: View {
                     }
                     .padding(.horizontal, 20)
                     
-                    // Genre grid
+                    // Selected genres (with reordering)
+                    if !genrePreferences.orderedFavoriteGenres.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Your Genres")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                
+                                Spacer()
+                                
+                                Text("Long press to drag")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 20)
+                            
+                            List {
+                                ForEach(genrePreferences.orderedFavoriteGenres, id: \.self) { genre in
+                                    HStack(spacing: 12) {
+                                        Text(genre)
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+                                            .foregroundColor(.primary)
+                                        
+                                        Spacer()
+                                        
+                                        Button(action: {
+                                            genrePreferences.toggleGenre(genre)
+                                        }) {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .foregroundColor(.red)
+                                                .font(.title3)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                    .listRowBackground(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(Color.purple.opacity(0.1))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 12)
+                                                    .stroke(Color.purple.opacity(0.3), lineWidth: 1)
+                                            )
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 4)
+                                    )
+                                }
+                                .onMove { from, to in
+                                    genrePreferences.reorderGenres(from: from, to: to)
+                                }
+                            }
+                            .listStyle(.plain)
+                            .frame(height: CGFloat(genrePreferences.orderedFavoriteGenres.count * 60))
+                            .scrollDisabled(true)
+                            .environment(\.editMode, .constant(.active))
+                        }
+                        .padding(.bottom, 20)
+                    }
+                    
+                    // Available genres to add
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Available Genres")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 20)
+                        
                     LazyVGrid(columns: [
                         GridItem(.flexible()),
                         GridItem(.flexible())
                     ], spacing: 12) {
                         ForEach(genrePreferences.allGenres, id: \.self) { genre in
+                                if !genrePreferences.isFavorite(genre) {
                             GenreToggleCard(
                                 genre: genre,
-                                isSelected: genrePreferences.isFavorite(genre)
+                                        isSelected: false
                             ) {
                                 genrePreferences.toggleGenre(genre)
+                                    }
                             }
                         }
                     }
                     .padding(.horizontal, 20)
+                    }
                 }
                 .padding(.bottom, 40)
             }
@@ -1064,13 +1213,16 @@ struct GenreToggleCard: View {
 class NavigationCoordinator: ObservableObject {
     @Published var selectedMusicItem: MusicSearchResult?
     @Published var selectedArtist: String?
+    @Published var selectedUserId: String?
     @Published var showingMusicProfile = false
     @Published var showingArtistProfile = false
+    @Published var showingUserProfile = false
     
     func navigateToMusicProfile(_ item: TrendingItem) {
         // Convert TrendingItem to MusicSearchResult
+        // Use appleMusicId for fetching from Apple Music API, fallback to itemId
         let musicItem = MusicSearchResult(
-            id: item.itemId,
+            id: item.appleMusicId ?? item.itemId,
             title: item.title,
             artistName: item.subtitle ?? "",
             albumName: "",
@@ -1087,8 +1239,13 @@ class NavigationCoordinator: ObservableObject {
         selectedArtist = artistName
         showingArtistProfile = true
     }
+    
+    func navigateToUserProfile(_ userId: String) {
+        selectedUserId = userId
+        showingUserProfile = true
+    }
 }
 
 #Preview {
-    SocialFeedView()
+    SocialFeedView(viewModel: SocialFeedViewModel())
 } 

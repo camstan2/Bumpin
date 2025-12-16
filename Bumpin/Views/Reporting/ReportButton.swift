@@ -40,38 +40,17 @@ struct ReportMenuButton: View {
     let reportedUsername: String
     let contentPreview: String?
     
-    @State private var showReportSheet = false
-    @State private var showBlockSheet = false
+    /// Callbacks are provided by the parent to trigger sheets or direct actions.
+    var onReport: () -> Void = {}
+    var onBlock: () -> Void = {}
     
     var body: some View {
-        Group {
-            Button(action: {
-                showReportSheet = true
-            }) {
-                Label("Report", systemImage: "flag")
-            }
-            
-            Button(action: {
-                showBlockSheet = true
-            }) {
-                Label("Block User", systemImage: "hand.raised")
-            }
+        Button(action: onReport) {
+            Label("Report", systemImage: "flag")
         }
-        .sheet(isPresented: $showReportSheet) {
-            ReportContentView(
-                contentId: contentId,
-                contentType: contentType,
-                reportedUserId: reportedUserId,
-                reportedUsername: reportedUsername,
-                contentPreview: contentPreview
-            )
-        }
-        .sheet(isPresented: $showBlockSheet) {
-            BlockUserView(
-                userId: reportedUserId,
-                username: reportedUsername,
-                profilePictureUrl: nil
-            )
+        
+        Button(action: onBlock) {
+            Label("Block User", systemImage: "hand.raised.slash")
         }
     }
 }

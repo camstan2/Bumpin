@@ -31,6 +31,7 @@ class DJStreamingManager: NSObject, ObservableObject {
     private var listenersListener: ListenerRegistration?
     private var musicPlayer = ApplicationMusicPlayer.shared
     private var cancellables = Set<AnyCancellable>()
+    private var isAudioSessionActive = false
     enum TransportKind { case real, noop }
     private var transport: DJTransport = RealBackendTransport()
     private(set) var transportKind: TransportKind = .real
@@ -48,8 +49,8 @@ class DJStreamingManager: NSObject, ObservableObject {
     
     override init() {
         super.init()
-        setupAudioEngine()
         setupMusicPlayerObservation()
+        // Don't activate audio session or start engine until streaming starts
     }
     
     deinit {
@@ -64,13 +65,18 @@ class DJStreamingManager: NSObject, ObservableObject {
     
     // MARK: - Audio Engine Setup
     
-    private func setupAudioEngine() {
+    private func activateAudioSessionAndEngine() {
+        guard !isAudioSessionActive else { return }
+        
         // Configure audio session for live streaming
         do {
             try audioSession.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth, .defaultToSpeaker])
             try audioSession.setActive(true)
+            isAudioSessionActive = true
+            print("✅ DJ Streaming audio session activated")
         } catch {
-            print("Failed to configure audio session: \(error)")
+            print("❌ Failed to activate DJ streaming audio session: \(error)")
+            return
         }
         
         // Setup audio engine
@@ -79,8 +85,25 @@ class DJStreamingManager: NSObject, ObservableObject {
         
         do {
             try audioEngine.start()
+            print("✅ DJ Streaming audio engine started")
         } catch {
-            print("Failed to start audio engine: \(error)")
+            print("❌ Failed to start audio engine: \(error)")
+        }
+    }
+    
+    private func deactivateAudioSessionAndEngine() {
+        guard isAudioSessionActive else { return }
+        
+        // Stop audio engine
+        audioEngine.stop()
+        
+        // Deactivate audio session
+        do {
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            isAudioSessionActive = false
+            print("✅ DJ Streaming audio session deactivated")
+        } catch {
+            print("❌ Failed to deactivate DJ streaming audio session: \(error)")
         }
     }
     
@@ -145,6 +168,9 @@ class DJStreamingManager: NSObject, ObservableObject {
             return
         }
         
+        // Activate audio session and engine when starting DJ session
+        activateAudioSessionAndEngine()
+        
         Task {
             do {
                 // Fetch user profile to get username
@@ -184,6 +210,8 @@ class DJStreamingManager: NSObject, ObservableObject {
                 await MainActor.run {
                     self.streamError = "Failed to start DJ session: \(error.localizedDescription)"
                 }
+                // Deactivate audio session if session creation failed
+                deactivateAudioSessionAndEngine()
             }
         }
     }
@@ -218,6 +246,9 @@ class DJStreamingManager: NSObject, ObservableObject {
                 chatListener?.remove()
                 listenersListener?.remove()
                 stopHeartbeat()
+                
+                // Deactivate audio session when session ends
+                deactivateAudioSessionAndEngine()
                 
             } catch {
                 await MainActor.run {
@@ -336,6 +367,9 @@ class DJStreamingManager: NSObject, ObservableObject {
         Task {
             try? await musicPlayer.stop()
         }
+        
+        // Deactivate audio session when stopping
+        deactivateAudioSessionAndEngine()
     }
     
     // MARK: - Session Listeners

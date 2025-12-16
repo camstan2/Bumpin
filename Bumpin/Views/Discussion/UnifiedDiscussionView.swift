@@ -19,7 +19,7 @@ struct UnifiedDiscussionView: View {
     }
     
     @StateObject private var viewModel = UnifiedDiscussionViewModel()
-    @StateObject private var voiceChatManager = VoiceChatManager()
+    // @StateObject private var voiceChatManager = VoiceChatManager() // Disabled - Discussion tab not in use
     @EnvironmentObject var discussionManager: DiscussionManager
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = 0

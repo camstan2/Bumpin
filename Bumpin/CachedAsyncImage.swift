@@ -25,7 +25,10 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
 
     var body: some View {
         Group {
-            if let uiImage {
+            // SCREENSHOT MODE: Show placeholder instead of real artwork
+            if ScreenshotModeManager.shared.isScreenshotMode {
+                placeholder()
+            } else if let uiImage {
                 content(Image(uiImage: uiImage))
                     .opacity(opacity)
                     .onAppear {

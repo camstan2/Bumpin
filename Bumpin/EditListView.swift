@@ -71,9 +71,9 @@ struct EditListView: View {
                             Image(systemName: "music.note")
                                 .font(.system(size: 28))
                                 .foregroundColor(.gray)
-                            Text("No items yet.")
+                            Text("No songs yet.")
                                 .foregroundColor(.secondary)
-                            Text("Tap 'Search & Add Music' to add songs, albums, or artists")
+                            Text("Tap 'Search & Add Music' to add songs to your list")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -115,18 +115,21 @@ struct EditListView: View {
             .navigationTitle("Edit List")
             .navigationBarItems(leading: Button("Cancel") { presentationMode.wrappedValue.dismiss() })
         }
-        .sheet(isPresented: $showMusicSearch) {
-            ListMusicSearchView(onItemsSelected: { selectedItems in
-                // Add selected items to the list
-                for item in selectedItems {
-                    if let jsonData = try? JSONEncoder().encode(item),
+        .fullScreenCover(isPresented: $showMusicSearch) {
+            ComprehensiveSearchView(
+                listSelectionMode: true,
+                onSongsSelected: { selectedSongs in
+                    // Add selected songs to the list
+                    for song in selectedSongs {
+                        if let jsonData = try? JSONEncoder().encode(song),
                        let jsonString = String(data: jsonData, encoding: .utf8) {
                         if !items.contains(jsonString) {
                             items.append(jsonString)
+                            }
                         }
                     }
                 }
-            })
+            )
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $coverImage)
@@ -211,8 +214,10 @@ struct EditListView: View {
                 Spacer()
                 
                 Button(action: { 
-                    if let itemIndex = items.firstIndex(of: item) {
-                        items.remove(at: itemIndex)
+                    withAnimation {
+                        if index >= 0 && index < items.count {
+                    items.remove(at: index)
+                        }
                     }
                 }) {
                     Image(systemName: "minus.circle.fill")
@@ -227,8 +232,10 @@ struct EditListView: View {
                     .font(.subheadline)
                 Spacer()
                 Button(action: { 
-                    if let itemIndex = items.firstIndex(of: item) {
-                        items.remove(at: itemIndex)
+                    withAnimation {
+                        if index >= 0 && index < items.count {
+                    items.remove(at: index)
+                        }
                     }
                 }) {
                     Image(systemName: "minus.circle.fill")

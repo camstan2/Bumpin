@@ -1,8 +1,11 @@
 import SwiftUI
+import FirebaseAuth
+import FirebaseFirestore
 
 struct PromptHistoryView: View {
     let coordinator: DailyPromptCoordinator
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var navigationCoordinator: NavigationCoordinator
     
     @State private var selectedPrompt: DailyPrompt?
     @State private var showPromptDetail = false
@@ -40,9 +43,10 @@ struct PromptHistoryView: View {
                 await coordinator.refreshAll()
             }
         }
-        .sheet(isPresented: $showPromptDetail) {
+        .fullScreenCover(isPresented: $showPromptDetail) {
             if let prompt = selectedPrompt {
                 PromptDetailView(prompt: prompt, coordinator: coordinator)
+                    .environmentObject(navigationCoordinator)
             }
         }
         .onAppear {
@@ -137,21 +141,10 @@ struct PromptHistoryRow: View {
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                     }
-                    
-                    HStack(spacing: 16) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "person.2.fill")
-                                .font(.caption)
-                            Text("\(prompt.totalResponses)")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                        }
-                        .foregroundColor(.secondary)
                         
                         Text(timeAgo(prompt.date))
                             .font(.caption)
                             .foregroundColor(.secondary)
-                    }
                 }
                 
                 Spacer()
@@ -195,12 +188,14 @@ struct PromptDetailView: View {
     let prompt: DailyPrompt
     let coordinator: DailyPromptCoordinator
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var navigationCoordinator: NavigationCoordinator
     
     // Data state
     @State private var topSongs: [SongRanking] = []
     @State private var popularResponses: [PromptResponse] = []
     @State private var friendResponses: [PromptResponse] = []
     @State private var userResponse: PromptResponse?
+    @State private var selectedResponse: PromptResponse?
     
     // Loading states
     @State private var isLoadingSongs = false
@@ -208,10 +203,12 @@ struct PromptDetailView: View {
     @State private var isLoadingFriends = false
     @State private var isLoadingUser = false
     
-    // Show more states
-    @State private var showAllSongs = false
-    @State private var showAllPopular = false
-    @State private var showAllFriends = false
+    // Pagination state
+    @State private var topSongsVisibleCount = 3
+    @State private var popularVisibleCount = 3
+    @State private var friendVisibleCount = 3
+    
+    private let pageSize = 3
     
     var body: some View {
         NavigationView {
@@ -247,17 +244,30 @@ struct PromptDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $showAllSongs) {
-            AllSongsView(prompt: prompt, coordinator: coordinator)
+        .fullScreenCover(isPresented: $navigationCoordinator.showingMusicProfile) {
+            if let item = navigationCoordinator.selectedMusicItem {
+                MusicProfileView(musicItem: item, pinnedLog: nil)
+                    .environmentObject(navigationCoordinator)
+            }
         }
-        .sheet(isPresented: $showAllPopular) {
-            AllPopularResponsesView(prompt: prompt, coordinator: coordinator)
+        .fullScreenCover(isPresented: $navigationCoordinator.showingArtistProfile) {
+            if let name = navigationCoordinator.selectedArtist {
+                ArtistProfileView(artistName: name)
+                    .environmentObject(navigationCoordinator)
+            }
         }
-        .sheet(isPresented: $showAllFriends) {
-            AllFriendResponsesView(prompt: prompt, coordinator: coordinator)
+        .fullScreenCover(isPresented: $navigationCoordinator.showingUserProfile) {
+            if let uid = navigationCoordinator.selectedUserId {
+                UserProfileView(userId: uid, showDismissButton: true)
+                    .environmentObject(navigationCoordinator)
+            }
         }
         .onAppear {
             loadAllData()
+        }
+        .fullScreenCover(item: $selectedResponse) { response in
+            PromptResponseDetailView(response: response, coordinator: coordinator)
+                .environmentObject(navigationCoordinator)
         }
     }
     
@@ -275,17 +285,6 @@ struct PromptDetailView: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
-            }
-            
-            HStack(spacing: 32) {
-                VStack(spacing: 4) {
-                    Text("\(prompt.totalResponses)")
-                        .font(.title3)
-                        .fontWeight(.bold)
-                        .foregroundColor(.blue)
-                    Text("Responses")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
                 
                 VStack(spacing: 4) {
@@ -293,10 +292,9 @@ struct PromptDetailView: View {
                         .font(.title3)
                         .fontWeight(.bold)
                         .foregroundColor(.purple)
-                    Text("Date")
+                Text("Prompt Date")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                }
             }
             .padding(.vertical, 16)
             .padding(.horizontal, 32)
@@ -319,7 +317,9 @@ struct PromptDetailView: View {
                 response: response,
                 coordinator: coordinator,
                 showUserInfo: false,
-                onTap: nil
+                onTap: {
+                    selectedResponse = response
+                }
             )
         }
     }
@@ -334,14 +334,6 @@ struct PromptDetailView: View {
                     .fontWeight(.bold)
                 
                 Spacer()
-                
-                if topSongs.count > 5 {
-                    Button("See All") {
-                        showAllSongs = true
-                    }
-                    .font(.subheadline)
-                    .foregroundColor(.purple)
-                }
             }
             
             if isLoadingSongs {
@@ -355,8 +347,32 @@ struct PromptDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
             } else {
-                ForEach(Array(topSongs.prefix(5).enumerated()), id: \.offset) { index, song in
+                ForEach(Array(topSongs.prefix(topSongsVisibleCount).enumerated()), id: \.offset) { index, song in
+                    Button(action: {
+                        navigationCoordinator.navigateToMusicProfile(
+                            TrendingItem(
+                                title: song.songTitle,
+                                subtitle: song.artistName,
+                                artworkUrl: song.artworkUrl,
+                                logCount: song.voteCount,
+                                averageRating: nil,
+                                itemType: "song",
+                                itemId: song.id
+                            )
+                        )
+                    }) {
                     SongRankingRow(ranking: song, rank: index + 1)
+                }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                
+                if topSongs.count > pageSize {
+                    Button(titleForPagination(current: topSongsVisibleCount, total: topSongs.count)) {
+                        togglePagination(current: &topSongsVisibleCount, total: topSongs.count)
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.purple)
+                    .padding(.top, 8)
                 }
             }
         }
@@ -372,14 +388,6 @@ struct PromptDetailView: View {
                     .fontWeight(.bold)
                 
                 Spacer()
-                
-                if popularResponses.count > 5 {
-                    Button("See All") {
-                        showAllPopular = true
-                    }
-                    .font(.subheadline)
-                    .foregroundColor(.purple)
-                }
             }
             
             if isLoadingPopular {
@@ -393,13 +401,24 @@ struct PromptDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
             } else {
-                ForEach(popularResponses.prefix(5), id: \.id) { response in
+                ForEach(popularResponses.prefix(popularVisibleCount), id: \.id) { response in
                     PromptResponseCard(
                         response: response,
                         coordinator: coordinator,
                         showUserInfo: true,
-                        onTap: nil
+                        onTap: {
+                            selectedResponse = response
+                        }
                     )
+                }
+                
+                if popularResponses.count > pageSize {
+                    Button(titleForPagination(current: popularVisibleCount, total: popularResponses.count)) {
+                        togglePagination(current: &popularVisibleCount, total: popularResponses.count)
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.purple)
+                    .padding(.top, 8)
                 }
             }
         }
@@ -410,19 +429,11 @@ struct PromptDetailView: View {
     private var friendResponsesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Friends' Responses")
+                Text("Friend Responses")
                     .font(.headline)
                     .fontWeight(.bold)
                 
                 Spacer()
-                
-                if friendResponses.count > 5 {
-                    Button("See All") {
-                        showAllFriends = true
-                    }
-                    .font(.subheadline)
-                    .foregroundColor(.purple)
-                }
             }
             
             if isLoadingFriends {
@@ -436,13 +447,24 @@ struct PromptDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 20)
             } else {
-                ForEach(friendResponses.prefix(5), id: \.id) { response in
+                ForEach(friendResponses.prefix(friendVisibleCount), id: \.id) { response in
                     PromptResponseCard(
                         response: response,
                         coordinator: coordinator,
                         showUserInfo: true,
-                        onTap: nil
+                        onTap: {
+                            selectedResponse = response
+                        }
                     )
+                }
+                
+                if friendResponses.count > pageSize {
+                    Button(titleForPagination(current: friendVisibleCount, total: friendResponses.count)) {
+                        togglePagination(current: &friendVisibleCount, total: friendResponses.count)
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.purple)
+                    .padding(.top, 8)
                 }
             }
         }
@@ -467,6 +489,7 @@ struct PromptDetailView: View {
         if let leaderboard = await coordinator.promptService.fetchLeaderboard(for: prompt.id) {
             await MainActor.run {
                 topSongs = leaderboard.songRankings.sorted { $0.voteCount > $1.voteCount }
+                topSongsVisibleCount = min(pageSize, topSongs.count)
             }
         }
     }
@@ -481,6 +504,7 @@ struct PromptDetailView: View {
         
         await MainActor.run {
             popularResponses = sortedByLikes
+            popularVisibleCount = min(pageSize, popularResponses.count)
         }
     }
     
@@ -497,6 +521,7 @@ struct PromptDetailView: View {
         
         await MainActor.run {
             friendResponses = friendsOnly
+            friendVisibleCount = min(pageSize, friendResponses.count)
         }
     }
     
@@ -513,6 +538,26 @@ struct PromptDetailView: View {
             await MainActor.run {
                 userResponse = userResp
             }
+        }
+    }
+    
+    // MARK: - Pagination Helpers
+    
+    private func titleForPagination(current: Int, total: Int) -> String {
+        if current >= total {
+            return "See Less"
+        }
+        if current + pageSize >= total {
+            return "See All"
+        }
+        return "Load More"
+    }
+    
+    private func togglePagination(current: inout Int, total: Int) {
+        if current >= total {
+            current = min(pageSize, total)
+        } else {
+            current = min(current + pageSize, total)
         }
     }
     
@@ -772,7 +817,7 @@ struct AllFriendResponsesView: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 40)
             }
-            .navigationTitle("Friends' Responses")
+            .navigationTitle("Friend Responses")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -788,14 +833,62 @@ struct AllFriendResponsesView: View {
     private func loadAllFriendResponses() {
         isLoading = true
         Task {
-            let allResponses = await coordinator.promptService.fetchResponsesForPrompt(prompt.id, limit: 100)
+            guard let currentUserId = Auth.auth().currentUser?.uid else {
+                print("❌ No current user for friend responses")
+                await MainActor.run {
+                    isLoading = false
+                }
+                return
+            }
             
-            // Filter to only include friends (placeholder implementation)
-            let friendsOnly = allResponses // TODO: Filter by actual friends
-            
-            await MainActor.run {
-                allFriendResponses = friendsOnly
-                isLoading = false
+            do {
+                // Fetch user's following list from Firestore
+                let db = Firestore.firestore()
+                let followingSnapshot = try await db.collection("users")
+                    .document(currentUserId)
+                    .collection("following")
+                    .getDocuments()
+                
+                let followingUserIds = Set(followingSnapshot.documents.map { $0.documentID })
+                
+                print("📊 [FriendResponses] Found \(followingUserIds.count) following users")
+                
+                // Fetch all responses for this prompt
+                let allResponses = await coordinator.promptService.fetchResponsesForPrompt(prompt.id, limit: 500)
+                
+                print("📊 [FriendResponses] Found \(allResponses.count) total responses")
+                
+                // Filter to only include responses from users we follow
+                let friendResponses = allResponses.filter { response in
+                    followingUserIds.contains(response.userId)
+                }
+                
+                print("📊 [FriendResponses] Found \(friendResponses.count) friend responses")
+                
+                // Sort by engagement (likes + comments)
+                let sortedResponses = friendResponses.sorted { response1, response2 in
+                    let engagement1 = response1.likeCount + response1.commentCount
+                    let engagement2 = response2.likeCount + response2.commentCount
+                    
+                    // If engagement is equal, sort by likes
+                    if engagement1 == engagement2 {
+                        return response1.likeCount > response2.likeCount
+                    }
+                    
+                    return engagement1 > engagement2
+                }
+                
+                await MainActor.run {
+                    allFriendResponses = sortedResponses
+                    isLoading = false
+                }
+                
+            } catch {
+                print("❌ [FriendResponses] Error loading: \(error)")
+                await MainActor.run {
+                    allFriendResponses = []
+                    isLoading = false
+                }
             }
         }
     }
@@ -803,4 +896,5 @@ struct AllFriendResponsesView: View {
 
 #Preview {
     PromptHistoryView(coordinator: DailyPromptCoordinator())
+        .environmentObject(NavigationCoordinator())
 }

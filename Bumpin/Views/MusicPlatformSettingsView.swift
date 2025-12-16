@@ -5,6 +5,7 @@ import SwiftUI
 struct MusicPlatformSettingsView: View {
     @StateObject private var unifiedSearchService = UnifiedMusicSearchService.shared
     @StateObject private var spotifyService = SpotifyService.shared
+    @StateObject private var musicAuthManager = MusicAuthorizationManager.shared
     @State private var showingSpotifyAuth = false
     
     var body: some View {
@@ -57,6 +58,8 @@ struct MusicPlatformSettingsView: View {
                 // Platform status
                 platformStatusSection
                 
+                manageConnectionsSection
+                
                 // Cross-platform benefits
                 crossPlatformBenefitsSection
             }
@@ -83,10 +86,20 @@ struct MusicPlatformSettingsView: View {
                 PlatformStatusCard(
                     platform: "Apple Music",
                     icon: "music.note",
-                    isConnected: true, // Always available through MusicKit
-                    statusText: "Connected",
-                    statusColor: .green
-                )
+                    isConnected: musicAuthManager.isConnected,
+                    statusText: musicAuthManager.isConnected ? "Connected" : "Disconnected",
+                    statusColor: musicAuthManager.isConnected ? .green : .orange,
+                    buttonTitle: musicAuthManager.isConnected ? "Disconnect" : "Connect",
+                    buttonColor: musicAuthManager.isConnected ? .red : .purple
+                ) {
+                    if musicAuthManager.isConnected {
+                        musicAuthManager.disconnectAppleMusic()
+                    } else {
+                        Task {
+                            await musicAuthManager.requestMusicAuthorization()
+                        }
+                    }
+                }
                 
                 // Spotify status
                 PlatformStatusCard(
@@ -94,9 +107,13 @@ struct MusicPlatformSettingsView: View {
                     icon: "magnifyingglass",
                     isConnected: spotifyService.isAuthenticated,
                     statusText: spotifyService.isAuthenticated ? "Connected" : "Not Connected",
-                    statusColor: spotifyService.isAuthenticated ? .green : .orange
+                    statusColor: spotifyService.isAuthenticated ? .green : .orange,
+                    buttonTitle: spotifyService.isAuthenticated ? "Disconnect" : "Connect",
+                    buttonColor: spotifyService.isAuthenticated ? .red : .purple
                 ) {
-                    if !spotifyService.isAuthenticated {
+                    if spotifyService.isAuthenticated {
+                        spotifyService.disconnectSpotifySearch()
+                    } else {
                         showingSpotifyAuth = true
                     }
                 }
@@ -107,9 +124,15 @@ struct MusicPlatformSettingsView: View {
                     icon: "music.note.list",
                     isConnected: spotifyService.isUserAuthenticated,
                     statusText: spotifyService.isUserAuthenticated ? "Connected" : "Not Connected",
-                    statusColor: spotifyService.isUserAuthenticated ? .green : .orange
+                    statusColor: spotifyService.isUserAuthenticated ? .green : .orange,
+                    buttonTitle: spotifyService.isUserAuthenticated ? "Disconnect" : "Connect",
+                    buttonColor: spotifyService.isUserAuthenticated ? .red : .purple
                 ) {
-                    if !spotifyService.isUserAuthenticated {
+                    if spotifyService.isUserAuthenticated {
+                        Task {
+                            await spotifyService.disconnectSpotifyLibrary()
+                        }
+                    } else {
                         Task {
                             let success = await spotifyService.authenticateUser()
                             if success {
@@ -120,6 +143,24 @@ struct MusicPlatformSettingsView: View {
                 }
             }
             .padding(.horizontal, 20)
+        }
+    }
+    
+    @ViewBuilder
+    private var manageConnectionsSection: some View {
+        VStack(spacing: 16) {
+            Text("Manage Connections")
+                .font(.headline)
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Disconnecting clears stored credentials. You can reconnect anytime.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 20)
+            }
         }
     }
     
@@ -262,6 +303,8 @@ struct PlatformStatusCard: View {
     let isConnected: Bool
     let statusText: String
     let statusColor: Color
+    let buttonTitle: String?
+    let buttonColor: Color?
     var onTap: (() -> Void)? = nil
     
     var body: some View {
@@ -283,15 +326,16 @@ struct PlatformStatusCard: View {
             
             Spacer()
             
-            if let onTap = onTap, !isConnected {
-                Button("Connect") {
+            if let buttonTitle = buttonTitle,
+               let onTap = onTap {
+                Button(buttonTitle) {
                     onTap()
                 }
                 .font(.caption)
-                .foregroundColor(.purple)
+                .foregroundColor(buttonColor ?? .purple)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.purple.opacity(0.1))
+                .background((buttonColor ?? .purple).opacity(0.1))
                 .cornerRadius(12)
             }
         }

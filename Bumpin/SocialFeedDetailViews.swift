@@ -16,25 +16,28 @@ struct PressableRowStyle: ButtonStyle {
 final class RelativeTimeFormatter {
     static let shared = RelativeTimeFormatter()
     private init() {}
+    
     func string(for date: Date) -> String {
-        let now = Date()
-        let seconds = max(0, Int(now.timeIntervalSince(date)))
-        if seconds < 60 { return "Just now" }
-        let minutes = seconds / 60
-        if minutes < 60 { return minutes == 1 ? "1 minute ago" : "\(minutes) minutes ago" }
-        let hours = minutes / 60
-        if hours < 24 { return hours == 1 ? "1 hour ago" : "\(hours) hours ago" }
-        let days = hours / 24
-        if days < 7 { return days == 1 ? "1 day ago" : "\(days) days ago" }
-        if days == 7 { return "One week ago" }
-        let calendar = Calendar.current
-        let yearOfDate = calendar.component(.year, from: date)
-        let yearNow = calendar.component(.year, from: now)
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        formatter.doesRelativeDateFormatting = false
-        formatter.dateFormat = yearOfDate == yearNow ? "MMMM d" : "MMMM d, yyyy"
-        return formatter.string(from: date)
+        let interval = Date().timeIntervalSince(date)
+        
+        if interval < 60 {
+            return "Just now"
+        } else if interval < 3600 {
+            let minutes = Int(interval / 60)
+            return "\(minutes)m"
+        } else if interval < 86400 {
+            let hours = Int(interval / 3600)
+            return "\(hours)h"
+        } else if interval < 604800 { // Less than 7 days
+            let days = Int(interval / 86400)
+            return "\(days)d"
+        } else if interval < 2592000 { // Less than 30 days
+            let weeks = Int(interval / 604800)
+            return "\(weeks)w"
+        } else {
+            let months = Int(interval / 2592000)
+            return "\(months)mo"
+        }
     }
 }
 
@@ -74,7 +77,7 @@ struct FriendsPopularDetailView: View {
                 }
                 if isLoadingMore { HStack { Spacer(); ProgressView(); Spacer() } }
             }
-            .navigationTitle("Popular with Friends")
+            .navigationTitle("Trending with Friends")
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
             .onAppear {
                 if itemsState.isEmpty { itemsState = initialItems }
@@ -99,8 +102,9 @@ struct FriendsPopularDetailView: View {
                 let more = grouped.compactMap { (itemId, logs) -> TrendingItem? in
                     guard let first = logs.first else { return nil }
                     let ratings = logs.compactMap { $0.rating }
-                    let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                    return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "song", itemId: itemId)
+                    let avg = ratings.isEmpty ? nil : ratings.reduce(0.0, +) / Double(ratings.count)
+                    let normalizedAvg = TrendingItem.normalizedAverage(optional: avg)
+                    return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: normalizedAvg, itemType: "song", itemId: itemId)
                 }
                 var existing = Dictionary(uniqueKeysWithValues: itemsState.map { ($0.itemId, $0) })
                 for m in more { existing[m.itemId] = m }
@@ -198,29 +202,38 @@ struct TrendingDetailView: View {
 
     // Local helpers replicate view model logic for aggregation
     private func calculateTrendingSongs(from logs: [MusicLog]) -> [TrendingItem] {
-        let grouped = Dictionary(grouping: logs) { $0.itemId }
-        return grouped.compactMap { (itemId, logs) in
+        // 🎯 Phase 3: Group by universalTrackId for cross-platform aggregation
+        let grouped = Dictionary(grouping: logs) { log in
+            log.universalTrackId ?? log.itemId // Fallback to itemId for old logs
+        }
+        return grouped.compactMap { (trackId, logs) in
             guard let first = logs.first else { return nil }
             let ratings = logs.compactMap { $0.rating }
-            let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-            return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "song", itemId: itemId)
+            let avg = ratings.isEmpty ? nil : ratings.reduce(0.0, +) / Double(ratings.count)
+            let normalizedAvg = TrendingItem.normalizedAverage(optional: avg)
+            return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: normalizedAvg, itemType: "song", itemId: trackId)
         }
     }
     private func calculateTrendingAlbums(from logs: [MusicLog]) -> [TrendingItem] {
-        let grouped = Dictionary(grouping: logs) { $0.itemId }
-        return grouped.compactMap { (itemId, logs) in
+        // 🎯 Phase 3: Group by universalTrackId for cross-platform aggregation
+        let grouped = Dictionary(grouping: logs) { log in
+            log.universalTrackId ?? log.itemId // Fallback to itemId for old logs
+        }
+        return grouped.compactMap { (trackId, logs) in
             guard let first = logs.first else { return nil }
             let ratings = logs.compactMap { $0.rating }
-            let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-            return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "album", itemId: itemId)
+            let avg = ratings.isEmpty ? nil : ratings.reduce(0.0, +) / Double(ratings.count)
+            let normalizedAvg = TrendingItem.normalizedAverage(optional: avg)
+            return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: normalizedAvg, itemType: "album", itemId: trackId)
         }
     }
     private func calculateTrendingArtists(from logs: [MusicLog]) -> [TrendingItem] {
         let grouped = Dictionary(grouping: logs) { $0.artistName }
         return grouped.compactMap { (artist, logs) in
             let ratings = logs.compactMap { $0.rating }
-            let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-            return TrendingItem(title: artist, subtitle: nil, artworkUrl: logs.first?.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "artist", itemId: artist)
+            let avg = ratings.isEmpty ? nil : ratings.reduce(0.0, +) / Double(ratings.count)
+            let normalizedAvg = TrendingItem.normalizedAverage(optional: avg)
+            return TrendingItem(title: artist, subtitle: nil, artworkUrl: logs.first?.artworkUrl, logCount: logs.count, averageRating: normalizedAvg, itemType: "artist", itemId: artist)
         }
     }
 }
@@ -269,8 +282,9 @@ struct CombinedTrendingDetailView: View {
                 let more: [TrendingItem] = grouped.compactMap { (_, logs) in
                     guard let first = logs.first else { return nil }
                     let ratings = logs.compactMap { $0.rating }
-                    let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                    return TrendingItem(title: first.title, subtitle: first.itemType == "artist" ? nil : first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: first.itemType, itemId: first.itemId)
+                    let avg = ratings.isEmpty ? nil : ratings.reduce(0.0, +) / Double(ratings.count)
+                    let normalizedAvg = TrendingItem.normalizedAverage(optional: avg)
+                    return TrendingItem(title: first.title, subtitle: first.itemType == "artist" ? nil : first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: normalizedAvg, itemType: first.itemType, itemId: first.itemId)
                 }
                 // Merge unique by (type,id)
                 var existing = Dictionary(uniqueKeysWithValues: itemsState.map { (($0.itemType + "|" + $0.itemId), $0) })
@@ -294,7 +308,7 @@ struct TrendingDetailRow: View {
     let item: TrendingItem
     let itemType: TrendingItemType
     let rank: Int
-    @State private var showingDetails = false
+    @EnvironmentObject var navigationCoordinator: NavigationCoordinator
     
     var body: some View {
         HStack(spacing: 12) {
@@ -305,10 +319,8 @@ struct TrendingDetailRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            showingDetails = true
-        }
-        .sheet(isPresented: $showingDetails) {
-            TrendingItemDetailView(item: item, itemType: itemType)
+            // Use the same navigation pattern as the main trending sections
+            navigationCoordinator.navigateToMusicProfile(item)
         }
     }
     
@@ -397,119 +409,149 @@ struct TrendingItemDetailView: View {
     @State private var relatedLogs: [MusicLog] = []
     @State private var isLoading = false
     @State private var hasReposted = false
+    @State private var showReportSheet = false
+    @State private var showBlockSheet = false
+    @State private var selectedReportLog: MusicLog?
+    
+    // MARK: - Subviews
+    @ViewBuilder
+    private var headerSection: some View {
+        VStack(spacing: 12) {
+            if let artworkUrl = item.artworkUrl, let url = URL(string: artworkUrl) {
+                AsyncImage(url: url) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    Color.gray.opacity(0.3)
+                }
+                .frame(width: 200, height: 200)
+                .cornerRadius(12)
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 200, height: 200)
+                    .overlay(
+                        Image(systemName: "music.note")
+                            .font(.system(size: 40))
+                            .foregroundColor(.gray)
+                    )
+            }
+            
+            VStack(spacing: 4) {
+                Text(item.title)
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .multilineTextAlignment(.center)
+                
+                if let subtitle = item.subtitle {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            HStack(spacing: 24) {
+                VStack {
+                    Text("\(item.logCount)")
+                        .font(.headline)
+                        .fontWeight(.bold)
+                    Text("Logs")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                if let averageRating = item.averageRating {
+                    VStack {
+                        Text(String(format: "%.1f", averageRating))
+                            .font(.headline)
+                            .fontWeight(.bold)
+                        Text("Rating")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var reviewsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recent Reviews")
+                .font(.headline)
+                .fontWeight(.bold)
+            
+            if isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else if relatedLogs.isEmpty {
+                Text("No reviews yet")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(relatedLogs.prefix(10)) { log in
+                        if log.review != nil && !log.review!.isEmpty {
+                            EnhancedReviewView(log: log, showFullDetails: false)
+                                .contextMenu {
+                                    Button {
+                                        selectedReportLog = log
+                                        showReportSheet = true
+                                    } label: {
+                                        Label("Report", systemImage: "flag")
+                                    }
+                                }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var repostSection: some View {
+        HStack {
+            Button(action: { toggleItemRepost() }) {
+                Label(hasReposted ? "Unrepost" : "Repost", systemImage: "arrow.2.squarepath")
+            }
+            .buttonStyle(.bordered)
+            .tint(.purple)
+            Spacer()
+        }
+    }
     
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    // Header
-                    VStack(spacing: 12) {
-                        // Large artwork
-                        if let artworkUrl = item.artworkUrl, let url = URL(string: artworkUrl) {
-                            AsyncImage(url: url) { image in
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                            } placeholder: {
-                                Color.gray.opacity(0.3)
-                            }
-                            .frame(width: 200, height: 200)
-                            .cornerRadius(12)
-                        } else {
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color.gray.opacity(0.3))
-                                .frame(width: 200, height: 200)
-                                .overlay(
-                                    Image(systemName: "music.note")
-                                        .font(.system(size: 40))
-                                        .foregroundColor(.gray)
-                                )
-                        }
-                        
-                        // Title and subtitle
-                        VStack(spacing: 4) {
-                            Text(item.title)
-                                .font(.title2)
-                                .fontWeight(.bold)
-                                .multilineTextAlignment(.center)
-                            
-                            if let subtitle = item.subtitle {
-                                Text(subtitle)
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        
-                        // Stats
-                        HStack(spacing: 24) {
-                            VStack {
-                                Text("\(item.logCount)")
-                                    .font(.headline)
-                                    .fontWeight(.bold)
-                                Text("Logs")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            
-                            if let averageRating = item.averageRating {
-                                VStack {
-                                    Text(String(format: "%.1f", averageRating))
-                                        .font(.headline)
-                                        .fontWeight(.bold)
-                                    Text("Rating")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    
+                    headerSection
                     Divider()
-                    
-                    // Recent reviews
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Recent Reviews")
-                            .font(.headline)
-                            .fontWeight(.bold)
-                        
-                        if isLoading {
-                            ProgressView()
-                                .frame(maxWidth: .infinity, alignment: .center)
-                        } else if relatedLogs.isEmpty {
-                            Text("No reviews yet")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                        } else {
-                            LazyVStack(spacing: 12) {
-                                ForEach(relatedLogs.prefix(10)) { log in
-                                    if log.review != nil && !log.review!.isEmpty {
-                                        EnhancedReviewView(log: log, showFullDetails: false)
-                                            .contextMenu {
-                                                Button(role: .destructive) {
-                                                    Task { _ = await ReportsService.shared.report(target: .log(logId: log.id), reason: "inappropriate") }
-                                                } label: { Label("Report", systemImage: "flag") }
-                                                Button("Hide user") {
-                                                    Task { _ = await UserPreferencesService.shared.hideUser(log.userId) }
-                                                }
-                                            }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Repost item action (song/album/artist)
-                    HStack {
-                        Button(action: { toggleItemRepost() }) {
-                            Label(hasReposted ? "Unrepost" : "Repost", systemImage: "arrow.2.squarepath")
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.purple)
-                        Spacer()
-                    }
+                    reviewsSection
+                    repostSection
                 }
                 .padding()
+            }
+            .sheet(isPresented: $showReportSheet) {
+                if let log = selectedReportLog {
+                    ReportContentView(
+                        contentId: log.id,
+                        contentType: .musicReview,
+                        reportedUserId: log.userId,
+                        reportedUsername: "user",
+                        contentPreview: log.review
+                    )
+                }
+            }
+            .sheet(isPresented: $showBlockSheet) {
+                if let log = selectedReportLog {
+                    BlockUserView(
+                        userId: log.userId,
+                        username: "user",
+                        profilePictureUrl: log.artworkUrl
+                    )
+                }
             }
             .navigationTitle(itemType.rawValue.capitalized)
             .navigationBarTitleDisplayMode(.inline)
@@ -737,13 +779,7 @@ struct FriendActivityDetailRow: View {
                     
                     // Rating stars
                     if let rating = activity.rating {
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= rating ? "star.fill" : "star")
-                                    .font(.caption2)
-                                    .foregroundColor(star <= rating ? .yellow : .gray)
-                            }
-                        }
+                        StarRatingDisplayView(rating: rating, starSize: 10, spacing: 2)
                     }
                 }
                 
@@ -767,12 +803,9 @@ struct FriendActivityDetailRow: View {
         }
         .contextMenu {
             if let log = activity.musicLog {
-                Button(role: .destructive) {
+                Button {
                     Task { _ = await ReportsService.shared.report(target: .log(logId: log.id), reason: "inappropriate") }
                 } label: { Label("Report", systemImage: "flag") }
-            }
-            Button("Hide user") {
-                Task { _ = await UserPreferencesService.shared.hideUser(activity.userId) }
             }
         }
         .overlay(
@@ -784,8 +817,8 @@ struct FriendActivityDetailRow: View {
                 }
             }, alignment: .bottomLeading
         )
-        .sheet(isPresented: $showingComments) {
-            if let log = activity.musicLog { CommentsSheet(log: log) }
+        .fullScreenCover(isPresented: $showingComments) {
+            if let log = activity.musicLog { UnifiedLogCommentsView(log: log) }
         }
     }
     
@@ -1007,7 +1040,11 @@ struct NowPlayingCreatorCard: View {
 struct NowPlayingFriendCard: View {
     let user: UserProfile
     @State private var showProfile = false
+    @State private var selectedSong: MusicSearchResult?
+    
     var body: some View {
+        VStack(spacing: 8) {
+            // Profile picture and username - tappable to view user profile
         Button(action: {
             AnalyticsService.shared.logTap(category: "friends_now_playing", id: user.uid)
             showProfile = true
@@ -1021,16 +1058,51 @@ struct NowPlayingFriendCard: View {
                     if user.isVerified == true { Image(systemName: "checkmark.seal.fill").foregroundColor(.blue).background(Color.white.clipShape(Circle())).offset(x: 4, y: 4).font(.caption) }
                 }
                 Text(user.displayName).font(.caption).fontWeight(.medium).lineLimit(1)
+                }
+            }
+            .buttonStyle(PressableRowStyle())
+            
+            // Song and artist - clickable to view song profile
                 if let song = user.nowPlayingSong, let artist = user.nowPlayingArtist {
-                    Text("\(song) — \(artist)").font(.caption2).foregroundColor(.secondary).lineLimit(2).multilineTextAlignment(.center)
+                Button(action: {
+                    AnalyticsService.shared.logTap(category: "friends_now_playing_song", id: "\(song)_\(artist)")
+                    // Search for the song to get proper track ID
+                    Task {
+                        let searchResults = await UnifiedMusicSearchService.shared.search(query: "\(song) \(artist)", limit: 1)
+                        if let firstSong = searchResults.songs.first {
+                            await MainActor.run {
+                                selectedSong = firstSong
+                            }
+                        } else {
+                            print("⚠️ Could not find song in Apple Music: \(song) by \(artist)")
+                            // Fallback: create a basic MusicSearchResult from the available info
+                            await MainActor.run {
+                                selectedSong = MusicSearchResult(
+                                    id: UUID().uuidString,
+                                    title: song,
+                                    artistName: artist,
+                                    albumName: "",
+                                    artworkURL: user.nowPlayingAlbumArt,
+                                    itemType: "song",
+                                    popularity: 0
+                                )
+                            }
+                        }
+                    }
+                }) {
+                    Text("\(song) — \(artist)")
+                        .font(.caption2)
+                        .foregroundColor(.purple)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                .buttonStyle(PlainButtonStyle())
                 }
             }
             .frame(width: 140)
             .background(Color(.systemBackground))
             .clipShape(RoundedRectangle(cornerRadius: AppTheme.cardCornerRadius))
             .shadow(color: AppTheme.cardShadowColor, radius: AppTheme.cardShadowRadius, x: 0, y: AppTheme.cardShadowOffset)
-        }
-        .buttonStyle(PressableRowStyle())
         .fullScreenCover(isPresented: $showProfile) { 
             NavigationView {
                 UserProfileView(userId: user.uid)
@@ -1045,6 +1117,9 @@ struct NowPlayingFriendCard: View {
                     }
             }
         }
+        .fullScreenCover(item: $selectedSong) { musicItem in
+            MusicProfileView(musicItem: musicItem, pinnedLog: nil)
+        }
         .onAppear { AnalyticsService.shared.logImpression(category: "friends_now_playing", id: user.uid) }
     }
 }
@@ -1053,30 +1128,107 @@ struct NowPlayingFriendCard: View {
 struct FriendsNowPlayingListView: View {
     let users: [UserProfile]
     @Environment(\.dismiss) private var dismiss
+    
     var body: some View {
         NavigationView {
             List(users, id: \.uid) { user in
+                FriendsNowPlayingListRow(user: user)
+            }
+            .navigationTitle("Listening now")
+            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+// MARK: - Friends Now Playing: List Row
+private struct FriendsNowPlayingListRow: View {
+    let user: UserProfile
+    @State private var showUserProfile = false
+    @State private var selectedSong: MusicSearchResult?
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Profile picture and username - clickable to user profile
+            Button(action: {
+                AnalyticsService.shared.logTap(category: "friends_now_playing_list", id: user.uid)
+                showUserProfile = true
+            }) {
                 HStack(spacing: 12) {
                     if let url = user.profilePictureUrl.flatMap(URL.init(string:)) {
                         CachedAsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color.gray.opacity(0.3) }
                             .frame(width: 40, height: 40).clipShape(Circle())
                     } else { Circle().fill(Color.gray.opacity(0.3)).frame(width: 40, height: 40) }
+                    
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(user.displayName).font(.subheadline).fontWeight(.semibold)
-                            if user.isVerified == true { Image(systemName: "checkmark.seal.fill").foregroundColor(.blue) }
+                            if user.isVerified == true { Image(systemName: "checkmark.seal.fill").foregroundColor(.blue).font(.caption2) }
                         }
-                        if let song = user.nowPlayingSong, let artist = user.nowPlayingArtist {
-                            Text("\(song) — \(artist)").font(.caption).foregroundColor(.secondary).lineLimit(1)
-                        } else {
+                        
+                        // Show placeholder if not playing
+                        if user.nowPlayingSong == nil || user.nowPlayingArtist == nil {
                             Text("Not playing").font(.caption).foregroundColor(.secondary)
                         }
                     }
-                    Spacer()
                 }
             }
-            .navigationTitle("Listening now")
-            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
+            .buttonStyle(PlainButtonStyle())
+            
+            // Song and artist - clickable to song profile (only if playing)
+                        if let song = user.nowPlayingSong, let artist = user.nowPlayingArtist {
+                Button(action: {
+                    AnalyticsService.shared.logTap(category: "friends_now_playing_list_song", id: "\(song)_\(artist)")
+                    // Search for the song to get proper track ID
+                    Task {
+                        let searchResults = await UnifiedMusicSearchService.shared.search(query: "\(song) \(artist)", limit: 1)
+                        if let firstSong = searchResults.songs.first {
+                            await MainActor.run {
+                                selectedSong = firstSong
+                            }
+                        } else {
+                            print("⚠️ Could not find song in Apple Music: \(song) by \(artist)")
+                            // Fallback: create a basic MusicSearchResult from the available info
+                            await MainActor.run {
+                                selectedSong = MusicSearchResult(
+                                    id: UUID().uuidString,
+                                    title: song,
+                                    artistName: artist,
+                                    albumName: "",
+                                    artworkURL: user.nowPlayingAlbumArt,
+                                    itemType: "song",
+                                    popularity: 0
+                                )
+                            }
+                        }
+                    }
+                }) {
+                    Text("\(song) — \(artist)")
+                        .font(.caption)
+                        .foregroundColor(.purple)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(PlainButtonStyle())
+                        }
+            
+                    Spacer()
+                }
+        .fullScreenCover(isPresented: $showUserProfile) {
+            NavigationView {
+                UserProfileView(userId: user.uid)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Back") {
+                                showUserProfile = false
+                            }
+                            .foregroundColor(.purple)
+                        }
+                    }
+            }
+        }
+        .fullScreenCover(item: $selectedSong) { musicItem in
+            MusicProfileView(musicItem: musicItem, pinnedLog: nil)
         }
     }
 }
@@ -1179,7 +1331,7 @@ struct WeeklyPopularListView: View {
                 }
                 if isLoading { HStack { Spacer(); ProgressView(); Spacer() } }
             }
-            .navigationTitle("Popular This Week")
+            .navigationTitle("Community Favorites")
             .navigationBarTitleDisplayMode(.large)
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
             .onAppear { if logs.isEmpty { logs = initialLogs; lastDateCursor = Date() } }
@@ -1198,16 +1350,8 @@ struct WeeklyPopularListView: View {
                 let snap = try await query.limit(to: 200).getDocuments()
                 let fetched = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
                 self.lastDateCursor = fetched.last?.dateLogged ?? self.lastDateCursor
-                let cfg = ScoringConfig.shared
-                func score(_ log: MusicLog) -> Double {
-                    let likes = Double(log.isLiked == true ? 1 : 0)
-                    let helpful = Double(log.helpfulCount ?? 0)
-                    let unhelpful = Double(log.unhelpfulCount ?? 0)
-                    let comments = Double(log.commentCount ?? 0)
-                    let rating = Double(log.rating ?? 0)
-                    return helpful * cfg.helpfulWeight + comments * cfg.commentsWeight + likes * cfg.likesWeight + rating * cfg.ratingWeight - unhelpful * cfg.unhelpfulPenalty
-                }
-                let more = fetched.sorted { score($0) > score($1) }
+                // Use new engagement scoring service
+                let more = EngagementScoringService.shared.sortByEngagement(fetched)
                 self.logs.append(contentsOf: more.prefix(20))
                 isLoading = false
             } catch {
@@ -1330,11 +1474,25 @@ struct PopularLogRow: View {
     @State private var userProfile: UserProfile? = nil
     @State private var showUserProfile = false
     @State private var showingComments = false
+    @State private var resolvedAppleMusicId: String? = nil
+    @State private var showReportSheet = false
+    @State private var showBlockSheet = false
+    
+    // New engagement state
+    @State private var isLiked: Bool = false
+    @State private var likeCount: Int = 0
+    @State private var hasThumbsDown: Bool = false
+    @State private var thumbsDownCount: Int = 0
+    @State private var hasReposted: Bool = false
+    @State private var repostCount: Int = 0
+    @State private var showReposters = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 14) {
                 // Artwork → item profile
-                Button(action: { showDetail = true }) {
+                Button(action: {
+                    Task { await resolveAppleMusicIdAndShowDetail() }
+                }) {
                     Group {
                         if let artwork = log.artworkUrl, let url = URL(string: artwork) {
                             CachedAsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color.gray.opacity(0.3) }
@@ -1349,7 +1507,9 @@ struct PopularLogRow: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     // Title and artist → item profile
-                    Button(action: { showDetail = true }) {
+                    Button(action: {
+                        Task { await resolveAppleMusicIdAndShowDetail() }
+                    }) {
                         Text(log.title)
                             .font(.subheadline)
                             .fontWeight(.semibold)
@@ -1357,7 +1517,9 @@ struct PopularLogRow: View {
                             .foregroundColor(.primary)
                     }.buttonStyle(.plain)
                     if !log.artistName.isEmpty {
-                        Button(action: { showDetail = true }) {
+                        Button(action: {
+                            Task { await resolveAppleMusicIdAndShowDetail() }
+                        }) {
                             Text(log.artistName)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -1381,13 +1543,11 @@ struct PopularLogRow: View {
                             }
                         }.buttonStyle(.plain)
                         if let rating = log.rating {
-                            HStack(spacing: 2) {
-                                ForEach(1...5, id: \.self) { s in
-                                    Image(systemName: s <= rating ? "star.fill" : "star")
-                                        .foregroundColor(s <= rating ? .yellow : .gray)
-                                        .font(.caption2)
-                                }
-                            }
+                            StarRatingDisplayView(
+                                rating: rating,
+                                starSize: 10,
+                                spacing: 1
+                            )
                         }
                         if log.isPublic == false {
                             HStack(spacing: 4) { Image(systemName: "lock.fill").font(.caption2); Text("Private").font(.caption2) }
@@ -1428,36 +1588,115 @@ struct PopularLogRow: View {
         .contentShape(Rectangle())
         .onTapGesture {
             AnalyticsService.shared.logTap(category: "popular_row", id: log.id)
-            showDetail = true
+            Task { await resolveAppleMusicIdAndShowDetail() }
         }
         .fullScreenCover(isPresented: $showDetail) {
-            let result = MusicSearchResult(id: log.itemId, title: log.title, artistName: log.artistName, albumName: "", artworkURL: log.artworkUrl, itemType: log.itemType, popularity: 0)
+            let itemIdToUse = resolvedAppleMusicId ?? log.itemId
+            let result = MusicSearchResult(id: itemIdToUse, title: log.title, artistName: log.artistName, albumName: "", artworkURL: log.artworkUrl, itemType: log.itemType, popularity: 0)
             MusicProfileView(musicItem: result, pinnedLog: log)
         }
         .fullScreenCover(isPresented: $showUserProfile) {
-            UserProfileView(userId: log.userId)
+            // Show simplified profile (overview only, with back button) when opened from log cards
+            UserProfileView(userId: log.userId, showFullProfile: false)
         }
-        .sheet(isPresented: $showingComments) {
-            CommentsSheet(log: log)
+        .fullScreenCover(isPresented: $showingComments) {
+            UnifiedLogCommentsView(log: log)
         }
         .onAppear {
             AnalyticsService.shared.logImpression(category: "popular_row", id: log.id)
             if userProfile == nil {
                 Task { await fetchUser() }
             }
+            
+            // Load engagement state from cache or Firestore
+            if let currentUserId = Auth.auth().currentUser?.uid {
+                Task {
+                    let engagement = await LogEngagementCache.shared.getEngagement(logId: log.id, userId: currentUserId)
+                    await MainActor.run {
+                        isLiked = engagement.isLiked
+                        hasThumbsDown = engagement.hasThumbsDown
+                        hasReposted = engagement.hasReposted
+                    }
+                }
+            }
+            
+            likeCount = log.likeCount ?? 0
+            repostCount = log.repostCount ?? 0
         }
         .contextMenu {
             Button {
-                NotificationCenter.default.post(name: NSNotification.Name("OpenUserProfile"), object: log.userId)
-            } label: { Label("View Profile", systemImage: "person.crop.circle") }
-            Button("Hide user") {
-                Task { _ = await UserPreferencesService.shared.hideUser(log.userId) }
-            }
-            Button(role: .destructive) {
-                Task { _ = await ReportsService.shared.report(target: .log(logId: log.id), reason: "inappropriate") }
+                showReportSheet = true
             } label: { Label("Report", systemImage: "flag") }
         }
+        .sheet(isPresented: $showReportSheet) {
+            ReportContentView(
+                contentId: log.id,
+                contentType: .musicReview,
+                reportedUserId: log.userId,
+                reportedUsername: "user",
+                contentPreview: log.review
+            )
+        }
+        .sheet(isPresented: $showBlockSheet) {
+            BlockUserView(
+                userId: log.userId,
+                username: "user",
+                profilePictureUrl: log.artworkUrl
+            )
+        }
     }
+    
+    private func toggleLike() {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        Task {
+            let db = Firestore.firestore()
+            let likeRef = db.collection("logs").document(log.id).collection("likes").document(currentUserId)
+            
+            do {
+                if isLiked {
+                    try await likeRef.delete()
+                    try await db.collection("logs").document(log.id).updateData([
+                        "likeCount": FieldValue.increment(Int64(-1))
+                    ])
+                    
+                    await MainActor.run {
+                        isLiked = false
+                        likeCount -= 1
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: false)
+                    }
+                } else {
+                    async let setLike = likeRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    async let updateCount = db.collection("logs").document(log.id).updateData([
+                        "likeCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    try await (setLike, updateCount)
+                    
+                    // Create notification in background
+                    Task.detached(priority: .utility) {
+                        await NotificationService.shared.createLikeNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
+                    }
+                    
+                    await MainActor.run {
+                        isLiked = true
+                        likeCount += 1
+                        LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: true)
+                    }
+                }
+            } catch {
+                print("❌ Error toggling like: \(error)")
+            }
+        }
+    }
+    
     private func fetchUser() async {
         do {
             let snap = try await Firestore.firestore().collection("users").document(log.userId).getDocument()
@@ -1466,8 +1705,54 @@ struct PopularLogRow: View {
             }
         } catch { }
     }
+    
+    private func resolveAppleMusicIdAndShowDetail() async {
+        // First, check if this log is already from Apple Music
+        if let platform = log.musicPlatform, platform.lowercased().contains("apple") {
+            // Already Apple Music, use itemId directly
+            print("✅ Log is from Apple Music, using itemId directly: \(log.itemId)")
+            await MainActor.run {
+                resolvedAppleMusicId = log.itemId
+                showDetail = true
+            }
+            return
+        }
+        
+        // Check if we have a universalTrackId that we can resolve
+        if let universalId = log.universalTrackId {
+            print("🔍 Resolving universal track ID to Apple Music ID: \(universalId)")
+            
+            // Fetch the universal track
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                UniversalTrack.findById(universalId) { universalTrack in
+                    if let track = universalTrack, let appleMusicId = track.appleMusicId {
+                        print("✅ Found Apple Music ID from universal track: \(appleMusicId)")
+                        Task { @MainActor in
+                            self.resolvedAppleMusicId = appleMusicId
+                            self.showDetail = true
+                            continuation.resume()
+                        }
+                    } else {
+                        print("⚠️ No Apple Music ID found in universal track, falling back to log.itemId")
+                        Task { @MainActor in
+                            self.resolvedAppleMusicId = log.itemId
+                            self.showDetail = true
+                            continuation.resume()
+                        }
+                    }
+                }
+            }
+        } else {
+            // No universal track ID, use itemId as fallback
+            print("⚠️ No universal track ID or platform info, using log.itemId as fallback: \(log.itemId)")
+            await MainActor.run {
+                resolvedAppleMusicId = log.itemId
+                showDetail = true
+            }
+        }
+    }
 
-    private func updateRatingInline(_ newValue: Int) {
+    private func updateRatingInline(_ newValue: Double) {
         guard Auth.auth().currentUser?.uid == log.userId else { return }
         var updated = log
         updated.rating = newValue
@@ -1479,126 +1764,402 @@ struct PopularLogRow: View {
 struct EngagementBar: View {
     @State var log: MusicLog
     var onComments: () -> Void
-    @State private var likeAnimating = false
-    @State private var friendLikerProfiles: [UserProfile] = []
+    
+    // New engagement state
+    @State private var isLiked: Bool = false
+    @State private var likeCount: Int = 0
+    @State private var hasThumbsDown: Bool = false
+    @State private var thumbsDownCount: Int = 0
+    @State private var hasReposted: Bool = false
+    @State private var repostCount: Int = 0
+    @State private var showActivity = false
+    
+    // Optimistic update helpers
+    @State private var likeTask: Task<Void, Never>?
+    @State private var repostTask: Task<Void, Never>?
+    @State private var thumbsDownTask: Task<Void, Never>?
+    @State private var isProcessingLike = false
+    @State private var isProcessingRepost = false
+    @State private var isProcessingThumbsDown = false
+    
     var body: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 16) {
+            // Like button
             Button(action: { toggleLike() }) {
                 HStack(spacing: 4) {
-                    Image(systemName: log.isLiked == true ? "heart.fill" : "heart")
-                        .foregroundColor(log.isLiked == true ? .red : .secondary)
-                        .scaleEffect(likeAnimating ? 1.2 : 1.0)
-                        .animation(.spring(response: 0.25, dampingFraction: 0.6), value: likeAnimating)
-                    Text("\(log.isLiked == true ? 1 : 0)").foregroundColor(.secondary)
+                    Image(systemName: isLiked ? "heart.fill" : "heart")
+                        .symbolEffect(.bounce, value: isLiked)
+                    Text("\(likeCount)")
+                        .contentTransition(.numericText())
                 }
             }
-            .buttonStyle(.plain)
-            // Friend likers (mutuals) avatar preview
-            if !friendLikerProfiles.isEmpty {
-                HStack(spacing: -8) {
-                    ForEach(friendLikerProfiles.prefix(3), id: \.uid) { profile in
-                        if let urlStr = profile.profilePictureUrl, let url = URL(string: urlStr) {
-                            CachedAsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color.gray.opacity(0.3) }
-                                .frame(width: 18, height: 18)
-                                .clipShape(Circle())
-                                .overlay(Circle().stroke(Color.white, lineWidth: 1))
-                        } else {
-                            Circle()
-                                .fill(Color.purple.opacity(0.25))
-                                .frame(width: 18, height: 18)
-                                .overlay(Text(String((profile.username ?? "").prefix(1)).uppercased()).font(.caption2).foregroundColor(.purple))
-                                .overlay(Circle().stroke(Color.white, lineWidth: 1))
-                        }
-                    }
+            .foregroundColor(isLiked ? .red : .secondary)
+            .scaleEffect(isLiked ? 1.1 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isLiked)
+            .buttonStyle(PlainButtonStyle())
+            
+            // Comment button
+            Button(action: { 
+                LogEngagementHaptics.comment()
+                onComments() 
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "bubble.left")
+                    Text("\(log.commentCount ?? 0)")
                 }
-                .padding(.leading, 2)
-                .accessibilityLabel("Friends who liked")
-            } else if UserDefaults.standard.bool(forKey: "feed.mockData") {
-                // Mock fallback: always render 2–3 sample avatars in DEBUG mock to visualize the UI
-                let names = ["alex", "sam", "jordan", "taylor", "morgan", "casey"]
-                let count = 2 + (abs(log.id.hashValue) % 2) // 2 or 3
-                HStack(spacing: -8) {
-                    ForEach(0..<count, id: \.self) { idx in
-                        let initial = String(names[(idx + 1) % names.count].prefix(1)).uppercased()
-                        Circle()
-                            .fill(Color.purple.opacity(0.25))
-                            .frame(width: 18, height: 18)
-                            .overlay(Text(initial).font(.caption2).foregroundColor(.purple))
-                            .overlay(Circle().stroke(Color.white, lineWidth: 1))
-                    }
-                }
-                .padding(.leading, 2)
             }
-            Button(action: { onComments() }) {
+            .foregroundColor(.secondary)
+            .buttonStyle(PlainButtonStyle())
+            
+            // Thumbs down button
+            Button(action: { toggleThumbsDown() }) {
                 HStack(spacing: 4) {
-                    Image(systemName: "text.bubble"); Text("\(log.commentCount ?? 0)")
-                }.foregroundColor(.secondary)
-            }.buttonStyle(.plain)
-            Button(action: { vote(false) }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "hand.thumbsdown"); Text("\(log.unhelpfulCount ?? 0)")
-                }.foregroundColor(.secondary)
-            }.buttonStyle(.plain)
-            Button(action: { toggleRepost() }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.2.squarepath").foregroundColor(.secondary)
-                    Text("Repost").foregroundColor(.secondary)
+                    Image(systemName: hasThumbsDown ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                        .symbolEffect(.bounce, value: hasThumbsDown)
+                    if thumbsDownCount > 0 {
+                        Text("\(thumbsDownCount)")
+                            .contentTransition(.numericText())
+                    }
                 }
-            }.buttonStyle(.plain)
+            }
+            .foregroundColor(.secondary)
+            .scaleEffect(hasThumbsDown ? 1.1 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: hasThumbsDown)
+            .buttonStyle(PlainButtonStyle())
+            
+            // Repost button
+            Button(action: { handleRepost() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.2.squarepath")
+                        .foregroundColor(hasReposted ? .green : .secondary)
+                        .symbolEffect(.bounce, value: hasReposted)
+                    if repostCount > 0 {
+                        Text("\(repostCount)")
+                            .contentTransition(.numericText())
+                    }
+                }
+            }
+            .foregroundColor(.secondary)
+            .scaleEffect(hasReposted ? 1.1 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: hasReposted)
+            .buttonStyle(PlainButtonStyle())
+            
             Spacer()
+            
+            // View Activity button
+            Button(action: { 
+                LogEngagementHaptics.viewActivity()
+                showActivity = true 
+            }) {
+                Text("View Activity")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.purple)
+            }
+            .buttonStyle(PlainButtonStyle())
         }
         .font(.caption)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) { toggleLike() }
-        .onAppear { loadFriendLikerProfiles() }
+        .onAppear {
+            loadEngagement()
+        }
+        .fullScreenCover(isPresented: $showActivity) {
+            LogActivityView(logId: log.id, log: log)
+        }
     }
-    private func toggleLike() {
-        log.isLiked = !(log.isLiked ?? false)
-        likeAnimating = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { likeAnimating = false }
-        MusicLog.updateLog(log) { _ in }
-        AnalyticsService.shared.logEngagement(action: log.isLiked == true ? "like" : "unlike", contentType: "music_log", contentId: log.id, logId: log.id)
-    }
-    private func vote(_ helpful: Bool) {
-        ReviewHelpfulVote.updateVote(logId: log.id, userId: log.userId, isHelpful: helpful) { _ in }
-        AnalyticsService.shared.logEngagement(action: helpful ? "thumbs_up" : "thumbs_down", contentType: "music_log", contentId: log.id, logId: log.id)
-    }
-    private func toggleRepost() {
-        guard let current = Auth.auth().currentUser?.uid else { return }
-        Repost.hasReposted(userId: current, logId: log.id) { exists in
-            if exists {
-                Repost.remove(forUser: current, logId: log.id) { _ in }
-                AnalyticsService.shared.logEngagement(action: "unrepost", contentType: "music_log", contentId: log.id, logId: log.id)
-            } else {
-                Repost.add(Repost(logId: log.id, userId: current)) { _ in }
-                AnalyticsService.shared.logEngagement(action: "repost", contentType: "music_log", contentId: log.id, logId: log.id)
+    
+    private func loadEngagement() {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        likeCount = log.likeCount ?? 0
+        repostCount = log.repostCount ?? 0
+        thumbsDownCount = log.thumbsDownCount ?? 0
+        
+        Task {
+            let engagement = await LogEngagementCache.shared.getEngagement(logId: log.id, userId: currentUserId)
+            await MainActor.run {
+                isLiked = engagement.isLiked
+                hasThumbsDown = engagement.hasThumbsDown
+                hasReposted = engagement.hasReposted
             }
         }
     }
-
-    private func loadFriendLikerProfiles() {
-        guard let uid = Auth.auth().currentUser?.uid else { return }
-        let db = Firestore.firestore()
-        db.collection("users").document(uid).getDocument { snap, _ in
-            let data = snap?.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Set(followingIds).intersection(Set(followerIds))
-            UserLike.getItemLikes(itemId: log.id, itemType: .review) { likes, _ in
-                let likes = (likes ?? []).filter { mutuals.contains($0.userId) }
-                let topIds = Array(likes.sorted { $0.createdAt > $1.createdAt }.prefix(3)).map { $0.userId }
-                if topIds.isEmpty { return }
-                // Fetch minimal profiles
-                var results: [UserProfile] = []
-                let group = DispatchGroup()
-                for id in topIds {
-                    group.enter()
-                    db.collection("users").document(id).getDocument { doc, _ in
-                        defer { group.leave() }
-                        if let p = try? doc?.data(as: UserProfile.self) { results.append(p) }
+    
+    private func toggleLike() {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              !isProcessingLike else { return }
+        
+        isProcessingLike = true
+        
+        // Save previous state for rollback
+        let previousLikedState = isLiked
+        let previousCount = likeCount
+        
+        // ✨ OPTIMISTIC UPDATE: Update UI IMMEDIATELY
+        isLiked.toggle()
+        likeCount += isLiked ? 1 : -1
+        
+        // Update cache immediately
+        LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: isLiked)
+        
+        // Haptic feedback (instant)
+        if isLiked {
+            LogEngagementHaptics.like()
+        } else {
+            LogEngagementHaptics.unlike()
+        }
+        
+        print("🔍 [EngagementBar] toggleLike - optimistic update: \(isLiked)")
+        
+        // Cancel any pending like request
+        likeTask?.cancel()
+        
+        // Network request in background (non-blocking)
+        likeTask = Task(priority: .userInitiated) {
+            // Small debounce delay
+            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+            
+            guard !Task.isCancelled else { 
+                await MainActor.run { isProcessingLike = false }
+                return 
+            }
+            
+            do {
+                let db = Firestore.firestore()
+                let likeRef = db.collection("logs").document(log.id).collection("likes").document(currentUserId)
+                
+                if previousLikedState {
+                    // Was liked, now unlike
+                    print("🔍 [EngagementBar] Syncing unlike to server...")
+                    try await likeRef.delete()
+                    try await db.collection("logs").document(log.id).updateData([
+                        "likeCount": FieldValue.increment(Int64(-1))
+                    ])
+                } else {
+                    // Was not liked, now like
+                    print("🔍 [EngagementBar] Syncing like to server...")
+                    async let setLike = likeRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    async let updateCount = db.collection("logs").document(log.id).updateData([
+                        "likeCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    try await (setLike, updateCount)
+                    
+                    // Create notification in background (lowest priority)
+                    Task.detached(priority: .utility) {
+                        await NotificationService.shared.createLikeNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
                     }
                 }
-                group.notify(queue: .main) { self.friendLikerProfiles = results }
+                
+                print("✅ [EngagementBar] Like synced successfully")
+                
+                await MainActor.run {
+                    isProcessingLike = false
+                }
+                
+            } catch {
+                // ⚠️ Network failed - ROLLBACK to previous state
+                print("❌ [EngagementBar] Like sync failed, rolling back: \(error)")
+                
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isLiked = previousLikedState
+                        likeCount = previousCount
+                    }
+                    LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: previousLikedState)
+                    isProcessingLike = false
+                }
+            }
+        }
+    }
+    
+    private func toggleThumbsDown() {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              !isProcessingThumbsDown else { return }
+        
+        isProcessingThumbsDown = true
+        
+        // Save previous state for rollback
+        let previousState = hasThumbsDown
+        let previousCount = thumbsDownCount
+        
+        // ✨ OPTIMISTIC UPDATE: Update UI IMMEDIATELY
+        hasThumbsDown.toggle()
+        thumbsDownCount += hasThumbsDown ? 1 : -1
+        if thumbsDownCount < 0 { thumbsDownCount = 0 }
+        
+        // Update cache immediately
+        LogEngagementCache.shared.updateEngagement(logId: log.id, hasThumbsDown: hasThumbsDown)
+        
+        // Haptic feedback (instant)
+        LogEngagementHaptics.thumbsDown()
+        
+        print("🔍 [EngagementBar] toggleThumbsDown - optimistic update: \(hasThumbsDown)")
+        
+        // Cancel any pending request
+        thumbsDownTask?.cancel()
+        
+        // Network request in background
+        thumbsDownTask = Task(priority: .userInitiated) {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            
+            guard !Task.isCancelled else {
+                await MainActor.run { isProcessingThumbsDown = false }
+                return
+            }
+            
+            do {
+                let db = Firestore.firestore()
+                let thumbsDownRef = db.collection("logs").document(log.id).collection("thumbsDown").document(currentUserId)
+                
+                if previousState {
+                    // Was thumbs down, now remove
+                    print("🔍 [EngagementBar] Syncing thumbs down removal...")
+                    try await thumbsDownRef.delete()
+                    try await db.collection("logs").document(log.id).updateData([
+                        "thumbsDownCount": FieldValue.increment(Int64(-1))
+                    ])
+                } else {
+                    // Was not thumbs down, now add
+                    print("🔍 [EngagementBar] Syncing thumbs down add...")
+                    async let setThumbsDown = thumbsDownRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    async let updateCount = db.collection("logs").document(log.id).updateData([
+                        "thumbsDownCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    try await (setThumbsDown, updateCount)
+                    
+                    // Create notification in background
+                    Task.detached(priority: .utility) {
+                        await NotificationService.shared.createDislikeNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
+                    }
+                }
+                
+                print("✅ [EngagementBar] Thumbs down synced successfully")
+                
+                await MainActor.run {
+                    isProcessingThumbsDown = false
+                }
+                
+            } catch {
+                // ⚠️ ROLLBACK
+                print("❌ [EngagementBar] Thumbs down sync failed, rolling back: \(error)")
+                
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        hasThumbsDown = previousState
+                        thumbsDownCount = previousCount
+                    }
+                    LogEngagementCache.shared.updateEngagement(logId: log.id, hasThumbsDown: previousState)
+                    isProcessingThumbsDown = false
+                }
+            }
+        }
+    }
+    
+    private func handleRepost() {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              !isProcessingRepost else { return }
+        
+        isProcessingRepost = true
+        
+        // Save previous state for rollback
+        let previousRepostedState = hasReposted
+        let previousCount = repostCount
+        
+        // ✨ OPTIMISTIC UPDATE: Update UI IMMEDIATELY
+        hasReposted.toggle()
+        repostCount += hasReposted ? 1 : -1
+        
+        // Update cache immediately
+        LogEngagementCache.shared.updateEngagement(logId: log.id, hasReposted: hasReposted)
+        
+        // Haptic feedback (instant)
+        if hasReposted {
+            LogEngagementHaptics.repost()
+        } else {
+            LogEngagementHaptics.unrepost()
+        }
+        
+        print("🔍 [EngagementBar] handleRepost - optimistic update: hasReposted=\(hasReposted), count=\(repostCount)")
+        
+        // Cancel any pending request
+        repostTask?.cancel()
+        
+        // Network request in background
+        repostTask = Task(priority: .userInitiated) {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            
+            guard !Task.isCancelled else {
+                await MainActor.run { isProcessingRepost = false }
+                return
+            }
+            
+            do {
+                let db = Firestore.firestore()
+                let repostRef = db.collection("logs").document(log.id).collection("reposts").document(currentUserId)
+                
+                if previousRepostedState {
+                    // Was reposted, now remove
+                    print("🔍 [EngagementBar] Syncing repost removal...")
+                    try await repostRef.delete()
+                    try await db.collection("logs").document(log.id).updateData([
+                        "repostCount": FieldValue.increment(Int64(-1))
+                    ])
+                } else {
+                    // Was not reposted, now add
+                    print("🔍 [EngagementBar] Syncing repost add...")
+                    async let setRepost = repostRef.setData([
+                        "userId": currentUserId,
+                        "timestamp": FieldValue.serverTimestamp()
+                    ])
+                    async let updateCount = db.collection("logs").document(log.id).updateData([
+                        "repostCount": FieldValue.increment(Int64(1))
+                    ])
+                    
+                    try await (setRepost, updateCount)
+                    
+                    // Create notification in background
+                    Task.detached(priority: .utility) {
+                        await NotificationService.shared.createRepostNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
+                    }
+                }
+                
+                print("✅ [EngagementBar] Repost synced successfully")
+                
+                await MainActor.run {
+                    isProcessingRepost = false
+                }
+                
+            } catch {
+                // ⚠️ ROLLBACK
+                print("❌ [EngagementBar] Repost sync failed, rolling back: \(error)")
+                
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        hasReposted = previousRepostedState
+                        repostCount = previousCount
+                    }
+                    LogEngagementCache.shared.updateEngagement(logId: log.id, hasReposted: previousRepostedState)
+                    isProcessingRepost = false
+                }
             }
         }
     }
@@ -1645,9 +2206,24 @@ struct CommentsSheet: View {
         }
     }
     private func post() {
-        let uid = Auth.auth().currentUser?.uid ?? ""
-        let comment = ReviewComment(logId: log.id, userId: uid, username: userProfileName(), userProfilePictureUrl: nil, text: text)
-        ReviewComment.addComment(comment) { _ in AnalyticsService.shared.logComments(action: "post", contentId: log.id); load(); text = "" }
+        Task {
+            guard let context = await ReviewComment.currentUserContext() else { return }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            
+            let comment = ReviewComment(
+                logId: log.id,
+                userId: context.userId,
+                username: context.username,
+                userProfilePictureUrl: context.profilePictureUrl,
+                text: trimmed
+            )
+            ReviewComment.addComment(comment) { _ in
+                AnalyticsService.shared.logComments(action: "post", contentId: log.id)
+                load()
+                text = ""
+            }
+        }
     }
     private func userProfileName() -> String { Auth.auth().currentUser?.email ?? "you" }
 }
@@ -1780,6 +2356,7 @@ struct FollowersLogRow: View {
     @State private var userProfile: UserProfile? = nil
     @State private var showUserProfile = false
     @State private var showingComments = false
+    @State private var isPressed = false  // DESIGN ENHANCEMENT: Press state
     var reposterNames: [String]? = nil
     
     var body: some View {
@@ -1833,13 +2410,11 @@ struct FollowersLogRow: View {
                             }
                         }.buttonStyle(.plain)
                         if let rating = log.rating {
-                            HStack(spacing: 2) {
-                                ForEach(1...5, id: \.self) { s in
-                                    Image(systemName: s <= rating ? "star.fill" : "star")
-                                        .foregroundColor(s <= rating ? .yellow : .gray)
-                                        .font(.caption2)
-                                }
-                            }
+                            StarRatingDisplayView(
+                                rating: rating,
+                                starSize: 10,
+                                spacing: 1
+                            )
                         }
                         if log.isPublic == false {
                             HStack(spacing: 4) { Image(systemName: "lock.fill").font(.caption2); Text("Private").font(.caption2) }
@@ -1875,23 +2450,32 @@ struct FollowersLogRow: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+        // DESIGN ENHANCEMENT: Press state micro-interaction
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !isPressed { isPressed = true }
+                }
+                .onEnded { _ in
+                    isPressed = false
+                }
+        )
         .onTapGesture { showDetail = true }
         .fullScreenCover(isPresented: $showDetail) {
             let result = MusicSearchResult(id: log.itemId, title: log.title, artistName: log.artistName, albumName: "", artworkURL: log.artworkUrl, itemType: log.itemType, popularity: 0)
             MusicProfileView(musicItem: result, pinnedLog: log)
         }
         .fullScreenCover(isPresented: $showUserProfile) {
-            UserProfileView(userId: log.userId)
+            // Show simplified profile (overview only, with back button) when opened from log cards
+            UserProfileView(userId: log.userId, showFullProfile: false)
         }
         .onAppear { if userProfile == nil { Task { await fetchUser() } } }
         .contextMenu {
-            Button {
-                NotificationCenter.default.post(name: NSNotification.Name("OpenUserProfile"), object: log.userId)
-            } label: { Label("View Profile", systemImage: "person.crop.circle") }
-            Button("Hide user") { Task { _ = await UserPreferencesService.shared.hideUser(log.userId) } }
             Button(role: .destructive) { Task { _ = await ReportsService.shared.report(target: .log(logId: log.id), reason: "inappropriate") } } label: { Label("Report", systemImage: "flag") }
         }
-        .sheet(isPresented: $showingComments) { CommentsSheet(log: log) }
+        .fullScreenCover(isPresented: $showingComments) { UnifiedLogCommentsView(log: log) }
     }
     private func fetchUser() async {
         do {
@@ -2110,3 +2694,4 @@ struct CreatorsListView: View {
         }
     }
 }
+

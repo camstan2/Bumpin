@@ -262,11 +262,17 @@ struct SearchResultsPrioritizer {
         }
         prioritized.append(contentsOf: exactAlbumMatches)
         
-        // 7. LOWEST PRIORITY: All remaining results (songs, albums that don't match above criteria)
-        let remainingResults = results.all.filter { result in
+        // 7. LOWER PRIORITY: All remaining results (songs, albums that don't match above criteria)
+        let remainingMusicResults = (results.songs + results.albums).filter { result in
             !prioritized.contains(where: { $0.id == result.id })
         }
-        prioritized.append(contentsOf: remainingResults)
+        prioritized.append(contentsOf: remainingMusicResults)
+        
+        // 8. LOWEST PRIORITY: Users (friends/followers first, then all others)
+        let friendsFollowers = results.users.compactMap { $0 as? UserSearchResult }.filter { $0.isFriend || $0.isFollower }
+        let otherUsers = results.users.compactMap { $0 as? UserSearchResult }.filter { !$0.isFriend && !$0.isFollower }
+        prioritized.append(contentsOf: friendsFollowers)
+        prioritized.append(contentsOf: otherUsers)
         
         // Debug logging
         print("🔍 Search prioritization for '\(query)':")
@@ -274,6 +280,7 @@ struct SearchResultsPrioritizer {
         print("   🎤 Exact artist matches: \(exactArtistMatches.count)")
         print("   🎤 Partial artist matches: \(partialArtistMatches.count)")
         print("   🎤 Contains artist matches: \(containsArtistMatches.count)")
+        print("   👥 User results: \(results.users.count) (friends/followers: \(friendsFollowers.count))")
         if let firstResult = prioritized.first {
             print("   🥇 First result: \(firstResult.title) (\(firstResult.type.rawValue))")
         }
@@ -388,24 +395,33 @@ struct RecentlyTappedCard: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 16) {
-                // Artwork
-                AsyncImage(url: URL(string: item.artworkURL ?? "")) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } else {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.gray.opacity(0.3))
-                            .overlay(
-                                Image(systemName: iconForType(item.type))
-                                    .foregroundColor(.gray)
-                                    .font(.system(size: 20))
-                            )
+                // Artwork / Avatar
+                if item.type == .user {
+                    UserAvatarView(
+                        userId: item.id,
+                        existingUrl: item.artworkURL,
+                        initials: item.title,
+                        size: 56
+                    )
+                } else {
+                    AsyncImage(url: URL(string: item.artworkURL ?? "")) { phase in
+                        if let image = phase.image {
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.gray.opacity(0.3))
+                                .overlay(
+                                    Image(systemName: iconForType(item.type))
+                                        .foregroundColor(.gray)
+                                        .font(.system(size: 20))
+                                )
+                        }
                     }
+                    .frame(width: 56, height: 56)
+                    .cornerRadius(8)
                 }
-                .frame(width: 56, height: 56)
-                .cornerRadius(8)
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.title)
@@ -613,6 +629,29 @@ struct MusicArtistResult: SearchResult {
     }
 }
 
+struct UserSearchResult: SearchResult {
+    let id: String
+    let title: String // displayName
+    let subtitle: String // username
+    let artworkURL: URL?
+    let type: SearchResultType = .user
+    let username: String
+    let displayName: String
+    let isFriend: Bool
+    let isFollower: Bool
+    
+    init(from userProfile: UserProfile, isFriend: Bool = false, isFollower: Bool = false) {
+        self.id = userProfile.uid
+        self.title = userProfile.displayName
+        self.subtitle = "@\(userProfile.username)"
+        self.artworkURL = userProfile.profilePictureUrl.flatMap { URL(string: $0) }
+        self.username = userProfile.username
+        self.displayName = userProfile.displayName
+        self.isFriend = isFriend
+        self.isFollower = isFollower
+    }
+}
+
 // Type alias for compatibility
 typealias SearchResultItem = SearchResult
 
@@ -629,9 +668,28 @@ struct RecentlyTappedItem: Identifiable, Codable {
         self.id = result.id
         self.title = result.title
         self.subtitle = result.subtitle
-        self.artworkURL = result.artworkURL?.absoluteString
+        self.artworkURL = RecentlyTappedItem.sanitizedArtworkURL(result.artworkURL?.absoluteString)
         self.type = result.type
         self.tappedAt = Date()
+    }
+    
+    private static func sanitizedArtworkURL(_ urlString: String?) -> String? {
+        guard let urlString = urlString, !urlString.isEmpty else { return nil }
+        
+        // Data URLs (often base64 profile photos) can easily exceed the 4 MB
+        // UserDefaults cap, so drop them here.
+        if urlString.hasPrefix("data:image") {
+            print("⚠️ [RecentlyTappedItem] Dropping inline artwork URL (data URI too large)")
+            return nil
+        }
+        
+        // Guard against unusually long URLs (e.g. signed Firebase download URLs).
+        if urlString.count > 4096 {
+            print("⚠️ [RecentlyTappedItem] Dropping artwork URL longer than 4096 characters")
+            return nil
+        }
+        
+        return urlString
     }
 }
 
@@ -647,6 +705,22 @@ struct ComprehensiveSearchView: View {
     @Environment(\.promptSelectionMode) private var promptSelectionMode
     @Environment(\.onPromptSongSelected) private var onPromptSongSelected
     @Environment(\.dismiss) private var dismiss
+    
+    // MARK: - List Selection Mode (for adding songs to lists)
+    var listSelectionMode: Bool = false
+    var onSongsSelected: (([MusicSearchResult]) -> Void)? = nil
+    @State private var selectedSongIds: Set<String> = []
+    
+    // MARK: - Listen Later Selection Mode (for adding songs, albums, artists to listen later)
+    var listenLaterSelectionMode: Bool = false
+    var onListenLaterItemsSelected: (([MusicSearchResult]) -> Void)? = nil
+    @State private var selectedItemIds: Set<String> = []
+    
+    // MARK: - Pinned Selection Mode (for adding songs, albums, or artists to pinned items)
+    var pinnedSelectionMode: Bool = false
+    var pinnedItemType: String = "song" // "song", "album", or "artist"
+    var onPinnedItemsSelected: (([MusicSearchResult]) -> Void)? = nil
+    @State private var selectedPinnedItemIds: Set<String> = []
     
     @State private var searchText = ""
     @State private var isEditing = false
@@ -678,8 +752,17 @@ struct ComprehensiveSearchView: View {
     @State private var playlistSongs: [LibraryItem] = []
     @State private var isLoadingPlaylistSongs = false
     
+    // Spotify playlist state
+    @State private var selectedSpotifyPlaylist: UnifiedLibraryService.UnifiedPlaylist?
+    @State private var spotifyPlaylistSongs: [MusicSearchResult] = []
+    @State private var isLoadingSpotifyPlaylist = false
+    @State private var showAppleMusicPlaylist = false
+    @State private var showSpotifyPlaylist = false
+    
     // User profile navigation state
     @State private var selectedUserIdForProfile: String?
+    @State private var showUserProfile = false
+    @State private var prefetchedUserProfile: UserProfile? = nil
     
     // MARK: - Dynamic Tab Logic
     
@@ -714,39 +797,32 @@ struct ComprehensiveSearchView: View {
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-            // Tab selector
+            // Tab selector (hide in selection modes)
+            if !promptSelectionMode && !listSelectionMode && !listenLaterSelectionMode && !pinnedSelectionMode {
             tabSelector
-            
-            // Tab content
-            TabView(selection: $selectedTab) {
-                        searchTabView
-                    .tag(SearchTab.search)
-                        
-                        if availableTabs.contains(.appleMusicLibrary) {
-                            appleMusicLibraryTabView
-                                .tag(SearchTab.appleMusicLibrary)
-                        }
-                        
-                        if availableTabs.contains(.spotifyLibrary) {
-                            spotifyLibraryTabView
-                                .tag(SearchTab.spotifyLibrary)
-                        }
             }
-            .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
-        }
-        .navigationTitle(promptSelectionMode ? "Select Song" : "")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if promptSelectionMode {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
-                        dismiss()
+            
+            // Tab content (swipe disabled - tap only)
+            Group {
+                switch selectedTab {
+                case .search:
+                    searchTabView
+                case .appleMusicLibrary:
+                    if availableTabs.contains(.appleMusicLibrary) {
+                        appleMusicLibraryTabView
                     }
-                    .font(.subheadline)
-                    .foregroundColor(.purple)
+                case .spotifyLibrary:
+                    if availableTabs.contains(.spotifyLibrary) {
+                        spotifyLibraryTabView
+                    }
                 }
             }
         }
+            .navigationTitle(promptSelectionMode ? "Select Song" : (listSelectionMode ? "Add Songs" : (listenLaterSelectionMode ? "Add to Listen Later" : (pinnedSelectionMode ? "Add \(pinnedItemType.capitalized)s" : ""))))
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarHidden(!promptSelectionMode && !listSelectionMode && !listenLaterSelectionMode && !pinnedSelectionMode)
+        .toolbar {
+                toolbarContent
         }
         .onDisappear {
             // Cancel timers and tasks to avoid stray work
@@ -785,7 +861,16 @@ struct ComprehensiveSearchView: View {
             }
         }
         .sheet(item: $selectedUser) { user in
-            UserProfileView(userId: user.uid)
+            NavigationStack {
+                UserProfileView(userId: user.uid, showFullProfile: false)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Close") {
+                                selectedUser = nil
+                            }
+                        }
+                    }
+            }
         }
         .fullScreenCover(item: $selectedMusicResult) { music in
             MusicProfileView(musicItem: music, pinnedLog: nil)
@@ -798,12 +883,389 @@ struct ComprehensiveSearchView: View {
                 ArtistProfileView(artistName: artistName)
             }
         }
-        .sheet(item: Binding<IdentifiableString?>(
-            get: { selectedUserIdForProfile.map(IdentifiableString.init) },
-            set: { selectedUserIdForProfile = $0?.value }
-        )) { userIdWrapper in
-            UserProfileView(userId: userIdWrapper.value)
+        .fullScreenCover(isPresented: $showUserProfile) {
+            if let userId = selectedUserIdForProfile {
+                UserProfileView(
+                    userId: userId,
+                    showFullProfile: false,
+                    prefetchedProfile: prefetchedUserProfile,
+                    showDismissButton: true
+                )
+                .onDisappear {
+                    prefetchedUserProfile = nil
+                }
+            }
         }
+            .fullScreenCover(isPresented: $showAppleMusicPlaylist) {
+                if let playlist = selectedPlaylist {
+                    PlaylistDetailView(
+                        playlist: playlist,
+                        libraryService: libraryService
+                    )
+                }
+            }
+            .fullScreenCover(isPresented: $showSpotifyPlaylist) {
+                if let spotifyPlaylist = selectedSpotifyPlaylist {
+                    SpotifyPlaylistDetailView(
+                        playlist: spotifyPlaylist,
+                        songs: spotifyPlaylistSongs,
+                        isLoading: isLoadingSpotifyPlaylist,
+                        onSongTap: { song in
+                            let libraryItem = LibraryItem(
+                                id: song.id,
+                                title: song.title,
+                                artistName: song.artistName,
+                                albumName: song.albumName ?? "",
+                                artworkURL: song.artworkURL,
+                                itemType: .song
+                            )
+                            handleLibraryItemTap(libraryItem)
+                        }
+                    )
+                }
+            }
+        }
+    }
+    
+    // MARK: - Toolbar Content
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        if promptSelectionMode {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .font(.subheadline)
+                .foregroundColor(.purple)
+            }
+        }
+        
+        if listenLaterSelectionMode {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .font(.subheadline)
+                .foregroundColor(.purple)
+            }
+            
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Add (\(selectedItemIds.count))") {
+                    handleListenLaterAdd()
+                }
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundColor(.purple)
+                .disabled(selectedItemIds.isEmpty)
+            }
+        }
+        
+        if listSelectionMode {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .font(.subheadline)
+                .foregroundColor(.purple)
+            }
+            
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Add (\(selectedSongIds.count))") {
+                    handleListAdd()
+                }
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundColor(.purple)
+                .disabled(selectedSongIds.isEmpty)
+            }
+        }
+        
+        if pinnedSelectionMode {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .font(.subheadline)
+                .foregroundColor(.purple)
+            }
+            
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Add (\(selectedPinnedItemIds.count))") {
+                    handlePinnedAdd()
+                }
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundColor(.purple)
+                .disabled(selectedPinnedItemIds.isEmpty)
+            }
+        }
+    }
+    
+    // Remove the now-unused helper toolbar views
+    
+    // MARK: - Helper Functions for Toolbar Actions
+    private func handleListenLaterAdd() {
+        var selectedItems: [MusicSearchResult] = []
+        
+        // Get selected items from search results (songs, albums, artists)
+        let searchSongs = searchResults.songs.compactMap { result -> MusicSearchResult? in
+            guard selectedItemIds.contains(result.id) else { return nil }
+            if let musicSong = result as? MusicSongResult {
+                return MusicSearchResult(
+                    id: musicSong.id,
+                    title: musicSong.title,
+                    artistName: musicSong.artistName,
+                    albumName: musicSong.albumName,
+                    artworkURL: musicSong.artworkURL?.absoluteString,
+                    itemType: "song",
+                    popularity: 0
+                )
+            }
+            return nil
+        }
+        selectedItems.append(contentsOf: searchSongs)
+        
+        let searchAlbums = searchResults.albums.compactMap { result -> MusicSearchResult? in
+            guard selectedItemIds.contains(result.id) else { return nil }
+            if let musicAlbum = result as? MusicAlbumResult {
+                return MusicSearchResult(
+                    id: musicAlbum.id,
+                    title: musicAlbum.title,
+                    artistName: musicAlbum.artistName,
+                    albumName: musicAlbum.title,
+                    artworkURL: musicAlbum.artworkURL?.absoluteString,
+                    itemType: "album",
+                    popularity: 0
+                )
+            }
+            return nil
+        }
+        selectedItems.append(contentsOf: searchAlbums)
+        
+        let searchArtists = searchResults.artists.compactMap { result -> MusicSearchResult? in
+            guard selectedItemIds.contains(result.id) else { return nil }
+            if let musicArtist = result as? MusicArtistResult {
+                return MusicSearchResult(
+                    id: musicArtist.id,
+                    title: musicArtist.title,
+                    artistName: musicArtist.title,
+                    albumName: "",
+                    artworkURL: musicArtist.artworkURL?.absoluteString,
+                    itemType: "artist",
+                    popularity: 0
+                )
+            }
+            return nil
+        }
+        selectedItems.append(contentsOf: searchArtists)
+        
+        // Get selected items from recently tapped
+        let recentItems = recentlyTappedItems.compactMap { item -> MusicSearchResult? in
+            guard (item.type == .song || item.type == .album || item.type == .artist) && selectedItemIds.contains(item.id) else {
+                return nil
+            }
+            return MusicSearchResult(
+                id: item.id,
+                title: item.title,
+                artistName: item.subtitle,
+                albumName: item.type == .album ? item.title : "",
+                artworkURL: item.artworkURL,
+                itemType: item.type.rawValue,
+                popularity: 0
+            )
+        }
+        selectedItems.append(contentsOf: recentItems)
+        
+        // Remove duplicates
+        var uniqueItems: [MusicSearchResult] = []
+        var seenIds = Set<String>()
+        for item in selectedItems {
+            if !seenIds.contains(item.id) {
+                seenIds.insert(item.id)
+                uniqueItems.append(item)
+            }
+        }
+        
+        onListenLaterItemsSelected?(uniqueItems)
+        dismiss()
+    }
+    
+    private func handleListAdd() {
+        var selectedSongs: [MusicSearchResult] = []
+        
+        // Get selected songs from search results
+        let searchSongs = searchResults.songs.compactMap { result -> MusicSearchResult? in
+            guard selectedSongIds.contains(result.id) else {
+                return nil
+            }
+            
+            // Convert SearchResult to MusicSearchResult
+            if let musicSong = result as? MusicSongResult {
+                return MusicSearchResult(
+                    id: musicSong.id,
+                    title: musicSong.title,
+                    artistName: musicSong.artistName,
+                    albumName: musicSong.albumName,
+                    artworkURL: musicSong.artworkURL?.absoluteString,
+                    itemType: "song",
+                    popularity: 0
+                )
+            }
+            return nil
+        }
+        selectedSongs.append(contentsOf: searchSongs)
+        
+        // Get selected songs from recently tapped items
+        let recentSongs = recentlyTappedItems.compactMap { item -> MusicSearchResult? in
+            guard item.type == .song && selectedSongIds.contains(item.id) else {
+                return nil
+            }
+            return MusicSearchResult(
+                id: item.id,
+                title: item.title,
+                artistName: item.subtitle,
+                albumName: "",
+                artworkURL: item.artworkURL,
+                itemType: "song",
+                popularity: 0
+            )
+        }
+        selectedSongs.append(contentsOf: recentSongs)
+        
+        // Remove duplicates based on ID
+        var uniqueSongs: [MusicSearchResult] = []
+        var seenIds = Set<String>()
+        for song in selectedSongs {
+            if !seenIds.contains(song.id) {
+                seenIds.insert(song.id)
+                uniqueSongs.append(song)
+            }
+        }
+        
+        onSongsSelected?(uniqueSongs)
+        dismiss()
+    }
+    
+    private func handlePinnedAdd() {
+        var selectedItems: [MusicSearchResult] = []
+        
+        // Get selected items from search results based on item type
+        switch pinnedItemType.lowercased() {
+        case "song":
+            let searchSongs = searchResults.songs.compactMap { result -> MusicSearchResult? in
+                guard selectedPinnedItemIds.contains(result.id) else { return nil }
+                if let musicSong = result as? MusicSongResult {
+                    return MusicSearchResult(
+                        id: musicSong.id,
+                        title: musicSong.title,
+                        artistName: musicSong.artistName,
+                        albumName: musicSong.albumName,
+                        artworkURL: musicSong.artworkURL?.absoluteString,
+                        itemType: "song",
+                        popularity: 0
+                    )
+                }
+                return nil
+            }
+            selectedItems.append(contentsOf: searchSongs)
+            
+            // Get selected songs from recently tapped
+            let recentSongs = recentlyTappedItems.compactMap { item -> MusicSearchResult? in
+                guard item.type == .song && selectedPinnedItemIds.contains(item.id) else { return nil }
+                return MusicSearchResult(
+                    id: item.id,
+                    title: item.title,
+                    artistName: item.subtitle,
+                    albumName: "",
+                    artworkURL: item.artworkURL,
+                    itemType: "song",
+                    popularity: 0
+                )
+            }
+            selectedItems.append(contentsOf: recentSongs)
+            
+        case "album":
+            let searchAlbums = searchResults.albums.compactMap { result -> MusicSearchResult? in
+                guard selectedPinnedItemIds.contains(result.id) else { return nil }
+                if let musicAlbum = result as? MusicAlbumResult {
+                    return MusicSearchResult(
+                        id: musicAlbum.id,
+                        title: musicAlbum.title,
+                        artistName: musicAlbum.artistName,
+                        albumName: musicAlbum.title,
+                        artworkURL: musicAlbum.artworkURL?.absoluteString,
+                        itemType: "album",
+                        popularity: 0
+                    )
+                }
+                return nil
+            }
+            selectedItems.append(contentsOf: searchAlbums)
+            
+            // Get selected albums from recently tapped
+            let recentAlbums = recentlyTappedItems.compactMap { item -> MusicSearchResult? in
+                guard item.type == .album && selectedPinnedItemIds.contains(item.id) else { return nil }
+                return MusicSearchResult(
+                    id: item.id,
+                    title: item.title,
+                    artistName: item.subtitle,
+                    albumName: item.title,
+                    artworkURL: item.artworkURL,
+                    itemType: "album",
+                    popularity: 0
+                )
+            }
+            selectedItems.append(contentsOf: recentAlbums)
+            
+        case "artist":
+            let searchArtists = searchResults.artists.compactMap { result -> MusicSearchResult? in
+                guard selectedPinnedItemIds.contains(result.id) else { return nil }
+                if let musicArtist = result as? MusicArtistResult {
+                    return MusicSearchResult(
+                        id: musicArtist.id,
+                        title: musicArtist.title,
+                        artistName: musicArtist.title,
+                        albumName: "",
+                        artworkURL: musicArtist.artworkURL?.absoluteString,
+                        itemType: "artist",
+                        popularity: 0
+                    )
+                }
+                return nil
+            }
+            selectedItems.append(contentsOf: searchArtists)
+            
+            // Get selected artists from recently tapped
+            let recentArtists = recentlyTappedItems.compactMap { item -> MusicSearchResult? in
+                guard item.type == .artist && selectedPinnedItemIds.contains(item.id) else { return nil }
+                return MusicSearchResult(
+                    id: item.id,
+                    title: item.title,
+                    artistName: item.title,
+                    albumName: "",
+                    artworkURL: item.artworkURL,
+                    itemType: "artist",
+                    popularity: 0
+                )
+            }
+            selectedItems.append(contentsOf: recentArtists)
+            
+        default:
+            break
+        }
+        
+        // Remove duplicates
+        var uniqueItems: [MusicSearchResult] = []
+        var seenIds = Set<String>()
+        for item in selectedItems {
+            if !seenIds.contains(item.id) {
+                seenIds.insert(item.id)
+                uniqueItems.append(item)
+            }
+        }
+        
+        onPinnedItemsSelected?(uniqueItems)
+        dismiss()
     }
     
     // MARK: - Tab Selector
@@ -839,18 +1301,44 @@ struct ComprehensiveSearchView: View {
             // Search Header (always visible)
             searchHeader
             
-            // Search Content
-            if searchText.isEmpty {
-                emptySearchState
-            } else {
-                // Show results or loading, but keep search bar visible
-                if isLoading {
-                    SearchLoadingView()
+            // Search Content stays in place; overlay a lightweight loader when searching
+            ZStack {
+                if searchText.isEmpty {
+                    emptySearchState
                 } else {
                     searchResultsView
                 }
+                
+                if isLoading {
+                    searchingOverlay
+                        .transition(.opacity)
+                }
             }
         }
+    }
+
+    // MARK: - Inline searching overlay (keeps header and pills fixed)
+    private var searchingOverlay: some View {
+        ZStack {
+            // Do not block the layout; subtle dim optional
+            Color.clear
+            HStack(spacing: 10) {
+                ProgressView()
+                    .scaleEffect(1.2)
+                Text("Searching...")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: Color.black.opacity(0.15), radius: 12, y: 6)
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
     }
     
     // MARK: - Apple Music Library Tab View
@@ -868,9 +1356,8 @@ struct ComprehensiveSearchView: View {
                     sectionDetailView(section)
                 }
             case .playlistDetail:
-            if let playlist = selectedPlaylist {
-                playlistDetailView(playlist)
-                }
+                // Playlist details are now presented as fullScreenCover modals
+                EmptyView()
             case .searchResults:
                 librarySearchResults
             }
@@ -895,14 +1382,38 @@ struct ComprehensiveSearchView: View {
             // Library Header (same as Apple Music)
             libraryHeader
             
-            // Spotify Library Content (matching Apple Music structure)
-            spotifyMainLibraryContent
+            // Library Content (matching Apple Music navigation structure)
+            switch libraryViewState {
+            case .main:
+                spotifyMainLibraryContent
+            case .sectionDetail:
+                if let section = selectedLibrarySection {
+                    sectionDetailView(section)
+                }
+            case .playlistDetail:
+                // Playlist details are now presented as fullScreenCover modals
+                EmptyView()
+            case .searchResults:
+                librarySearchResults
+            }
         }
         .onAppear {
+            print("🔍 [ComprehensiveSearchView] spotifyLibraryTabView.onAppear called")
+            print("🔍 [ComprehensiveSearchView] spotifyService.isUserAuthenticated = \(spotifyService.isUserAuthenticated)")
             if spotifyService.isUserAuthenticated {
                 Task {
+                    print("🔍 [ComprehensiveSearchView] Calling loadSpotifyLibrary()...")
                     await unifiedLibraryService.loadSpotifyLibrary()
+                    print("🔍 [ComprehensiveSearchView] loadSpotifyLibrary() completed")
                 }
+            }
+        }
+        .onChange(of: spotifyService.isUserAuthenticated) { newValue in
+            print("🔍 [ComprehensiveSearchView] isUserAuthenticated changed to \(newValue)")
+            if newValue {
+                Task { await unifiedLibraryService.loadSpotifyLibrary() }
+            } else {
+                unifiedLibraryService.spotifyLibraryData = UnifiedLibraryService.SpotifyLibraryData()
             }
         }
     }
@@ -1024,8 +1535,16 @@ struct ComprehensiveSearchView: View {
                 Spacer()
                 
                 Button("See All") {
-                    // Handle see all action for Spotify
-                    print("See all Spotify recently added")
+                    // Navigate to all Spotify saved tracks
+                    let section = LibrarySection(
+                        title: "Spotify Songs",
+                        icon: "music.note",
+                        color: .green,
+                        itemCount: unifiedLibraryService.getSpotifyLibraryStats().savedTracks,
+                        itemType: .song
+                    )
+                    selectedLibrarySection = section
+                    libraryViewState = .sectionDetail
                 }
                 .font(.subheadline)
                 .foregroundColor(.purple)
@@ -1036,17 +1555,28 @@ struct ComprehensiveSearchView: View {
                 HStack(spacing: 12) {
                     ForEach(getSpotifyRecentlyAdded(), id: \.id) { item in
                         SpotifyRecentlyAddedCard(item: item)
+                            .id(item.id) // ensure each card refreshes when item changes
                             .onTapGesture {
-                                // Handle tap
-                                print("Tapped Spotify item: \(item.title)")
+                                // Convert MusicSearchResult to LibraryItem and handle tap
+                                let libraryItem = LibraryItem(
+                                    id: item.id,
+                                    title: item.title,
+                                    artistName: item.artistName,
+                                    albumName: item.albumName ?? "",
+                                    artworkURL: item.artworkURL,
+                                    itemType: LibraryItemType(rawValue: item.itemType) ?? .song
+                                )
+                                handleLibraryItemTap(libraryItem)
                             }
                     }
                 }
                 .padding(.horizontal, 20)
             }
+            .id("spotify-scroll-\(unifiedLibraryService.spotifyLibraryData.savedTracks.count)")
         }
         .padding(.top, 8)
         .padding(.bottom, 16)
+        .id("spotify-section-\(unifiedLibraryService.spotifyLibraryData.savedTracks.count)")
     }
     
     // MARK: - Recently Added Section
@@ -1110,8 +1640,9 @@ struct ComprehensiveSearchView: View {
             ], spacing: 16) {
                 ForEach(getSpotifyLibrarySections(), id: \.title) { section in
                     LibrarySectionCard(section: section) {
-                        // Handle section tap for Spotify
-                        print("Tapped Spotify section: \(section.title)")
+                        // Handle section tap for Spotify (same as Apple Music)
+                        selectedLibrarySection = section
+                        libraryViewState = .sectionDetail
                     }
                 }
             }
@@ -1152,27 +1683,109 @@ struct ComprehensiveSearchView: View {
     // MARK: - Section Detail View
     private func sectionDetailView(_ section: LibrarySection) -> some View {
         Group {
-            switch section.itemType {
-            case .song:
-                if section.title == "Recently Added" {
-                    RecentlyAddedView(libraryService: libraryService)
-            } else {
-                    SongsLibraryView(libraryService: libraryService)
+            // Check if we're in the Spotify Library tab
+            if selectedTab == .spotifyLibrary {
+                switch section.itemType {
+                case .song:
+                    // Spotify Songs Grid (matching Apple Music format exactly)
+                    ScrollView {
+                        LazyVGrid(columns: [
+                            GridItem(.flexible(), spacing: 16),
+                            GridItem(.flexible(), spacing: 16)
+                        ], spacing: 20) {
+                            let songs = unifiedLibraryService.getSpotifySavedTracks()
+                            
+                            if songs.isEmpty {
+                                VStack(spacing: 16) {
+                                    Image(systemName: "music.note")
+                                        .font(.system(size: 60))
+                                        .foregroundColor(.secondary)
+                                    Text("No Saved Songs")
+                                        .font(.title3)
+                                        .foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 100)
+                            } else {
+                                ForEach(songs) { song in
+                                    SpotifySongGridCard(song: song) {
+                                        // Convert to LibraryItem and handle tap
+                                        let libraryItem = LibraryItem(
+                                            id: song.id,
+                                            title: song.title,
+                                            artistName: song.artistName,
+                                            albumName: song.albumName ?? "",
+                                            artworkURL: song.artworkURL,
+                                            itemType: .song
+                                        )
+                                        handleLibraryItemTap(libraryItem)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                        .padding(.bottom, 100)
+                    }
+                    .background(Color(.systemGroupedBackground))
+                    
+                case .playlist:
+                    // Spotify Playlists Grid (matching Apple Music format exactly)
+                    ScrollView {
+                        LazyVGrid(columns: [
+                            GridItem(.flexible(), spacing: 16),
+                            GridItem(.flexible(), spacing: 16)
+                        ], spacing: 20) {
+                            let playlists = unifiedLibraryService.getSpotifyPlaylists()
+                            
+                            ForEach(playlists, id: \.id) { playlist in
+                                SpotifyPlaylistGridCard(playlist: playlist) {
+                                    // Navigate to Spotify playlist detail
+                                    Task {
+                                        await loadSpotifyPlaylistDetail(playlist)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                        .padding(.bottom, 100)
+                    }
+                    .background(Color(.systemGroupedBackground))
+                    
+                case .album, .artist:
+                    VStack(spacing: 16) {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 60))
+                            .foregroundColor(.secondary)
+                        Text("Coming Soon")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(.systemGroupedBackground))
                 }
-            case .album:
-                AlbumsLibraryView(libraryService: libraryService)
-            case .artist:
-                ArtistsLibraryView(libraryService: libraryService)
-            case .playlist:
-                PlaylistsView(libraryService: libraryService)
+            } else {
+                // Apple Music sections
+                switch section.itemType {
+                case .song:
+                    if section.title == "Recently Added" {
+                        RecentlyAddedView(libraryService: libraryService)
+                    } else {
+                        SongsLibraryView(libraryService: libraryService)
+                    }
+                case .album:
+                    AlbumsLibraryView(libraryService: libraryService)
+                case .artist:
+                    ArtistsLibraryView(libraryService: libraryService)
+                case .playlist:
+                    PlaylistsView(libraryService: libraryService)
+                }
             }
         }
     }
     
-    // MARK: - Playlist Detail View
-    private func playlistDetailView(_ playlist: LibraryPlaylist) -> some View {
-        PlaylistDetailView(playlist: playlist, libraryService: libraryService)
-    }
+    // MARK: - Playlist Detail View (removed - now using fullScreenCover)
     
     // MARK: - Library Search Results
     private var librarySearchResults: some View {
@@ -1259,6 +1872,8 @@ struct ComprehensiveSearchView: View {
                     
                 TextField("Search for music, artists, albums...", text: $searchText)
                         .textFieldStyle(PlainTextFieldStyle())
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
                     .onSubmit {
                         if !searchText.isEmpty {
                             handleSearchTextChange(searchText)
@@ -1281,9 +1896,13 @@ struct ComprehensiveSearchView: View {
                 .cornerRadius(10)
         .padding(.horizontal, 20)
             
-            // Filter pills (only when searching and not in prompt selection mode)
-            if !searchText.isEmpty && !promptSelectionMode {
+            // Filter pills (only when searching and not in prompt or list selection mode, OR when in listen later mode)
+            if (!searchText.isEmpty && !promptSelectionMode && !listSelectionMode && !pinnedSelectionMode) || listenLaterSelectionMode {
+                if listenLaterSelectionMode {
+                    listenLaterFilterPills
+                } else {
                 filterPills
+                }
             }
         }
         .padding(.vertical, 8)
@@ -1295,6 +1914,24 @@ struct ComprehensiveSearchView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
                 ForEach(SearchFilter.allCases, id: \.self) { filter in
+                    ModernFilterPill(
+                        filter: filter,
+                        isSelected: selectedFilter == filter,
+                        action: {
+                            selectedFilter = filter
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, 20)
+        }
+    }
+    
+    // MARK: - Listen Later Filter Pills (only All, Songs, Albums, Artists)
+    private var listenLaterFilterPills: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach([SearchFilter.all, .songs, .albums, .artists], id: \.self) { filter in
                     ModernFilterPill(
                         filter: filter,
                         isSelected: selectedFilter == filter,
@@ -1326,15 +1963,9 @@ struct ComprehensiveSearchView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                                 ForEach(recentQueryChips, id: \.self) { query in
-                                    Button(query) {
-                                        searchText = query
-                                    }
-                            .font(.subheadline)
-                                    .foregroundColor(.purple)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Color.purple.opacity(0.1))
-                                    .cornerRadius(16)
+                        RecentSearchPill(query: query) {
+                            searchText = query
+                        }
                     }
                 }
                 .padding(.horizontal, 20)
@@ -1359,8 +1990,77 @@ struct ComprehensiveSearchView: View {
             
                         LazyVStack(spacing: 12) {
                             ForEach(filteredRecentlyTapped.prefix(10)) { item in
+                                if listenLaterSelectionMode {
+                                    // Listen Later selection mode: show colored checkmarks
+                                    HStack(spacing: 12) {
+                                        // Colored selection indicator
+                                        if item.type == .song || item.type == .album || item.type == .artist {
+                                            let isSelected = selectedItemIds.contains(item.id)
+                                            let checkmarkColor: Color = {
+                                                switch item.type {
+                                                case .song: return .blue
+                                                case .album: return .orange
+                                                case .artist: return .green
+                                                default: return .purple
+                                                }
+                                            }()
+                                            
+                                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                                .font(.title2)
+                                                .foregroundColor(isSelected ? checkmarkColor : .gray)
+                                                .frame(width: 28)
+                                        } else {
+                                            Color.clear.frame(width: 28)
+                                        }
+                                        
                                 RecentlyTappedCard(item: item) {
                                     handleRecentlyTappedItemTap(item)
+                                        }
+                                    }
+                                } else if listSelectionMode {
+                                    // List selection mode: show checkmark indicator
+                                    HStack(spacing: 12) {
+                                        // Selection indicator (only for songs)
+                                        if item.type == .song {
+                                            Image(systemName: selectedSongIds.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                                                .font(.title2)
+                                                .foregroundColor(selectedSongIds.contains(item.id) ? .purple : .gray)
+                                                .frame(width: 28)
+                                        } else {
+                                            // Empty space for non-songs to maintain alignment
+                                            Color.clear
+                                                .frame(width: 28)
+                                        }
+                                        
+                                        RecentlyTappedCard(item: item) {
+                                            handleRecentlyTappedItemTap(item)
+                                        }
+                                    }
+                                } else if pinnedSelectionMode {
+                                    // Pinned selection mode: show checkmark indicator for the specified type
+                                    HStack(spacing: 12) {
+                                        let shouldShowCheckmark = (pinnedItemType.lowercased() == "song" && item.type == .song) ||
+                                                                  (pinnedItemType.lowercased() == "album" && item.type == .album) ||
+                                                                  (pinnedItemType.lowercased() == "artist" && item.type == .artist)
+                                        
+                                        if shouldShowCheckmark {
+                                            let isSelected = selectedPinnedItemIds.contains(item.id)
+                                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                                .font(.title2)
+                                                .foregroundColor(isSelected ? .purple : .gray)
+                                                .frame(width: 28)
+                                        } else {
+                                            Color.clear.frame(width: 28)
+                                        }
+                                        
+                                        RecentlyTappedCard(item: item) {
+                                            handleRecentlyTappedItemTap(item)
+                                        }
+                                    }
+                                } else {
+                                    RecentlyTappedCard(item: item) {
+                                        handleRecentlyTappedItemTap(item)
+                                    }
                         }
                     }
                 }
@@ -1398,8 +2098,71 @@ struct ComprehensiveSearchView: View {
         ScrollView {
             LazyVStack(spacing: 16) {
                 ForEach(getFilteredResults(), id: \.id) { result in
+                    if listenLaterSelectionMode {
+                        // Listen Later selection mode: show colored checkmarks based on type
+                        HStack(spacing: 12) {
+                            // Colored selection indicator
+                            if result.type == .song || result.type == .album || result.type == .artist {
+                                let isSelected = selectedItemIds.contains(result.id)
+                                let checkmarkColor: Color = {
+                                    switch result.type {
+                                    case .song: return .blue
+                                    case .album: return .orange
+                                    case .artist: return .green
+                                    default: return .purple
+                                    }
+                                }()
+                                
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundColor(isSelected ? checkmarkColor : .gray)
+                                    .frame(width: 28)
+                            } else {
+                                Color.clear.frame(width: 28)
+                            }
+                            
                     SearchResultCard(result: result) {
                         handleResultTap(result)
+                            }
+                        }
+                    } else if pinnedSelectionMode {
+                        // Pinned selection mode: show checkmark indicator for the specified type
+                        HStack(spacing: 12) {
+                            let shouldShowCheckmark = (pinnedItemType.lowercased() == "song" && result.type == .song) ||
+                                                      (pinnedItemType.lowercased() == "album" && result.type == .album) ||
+                                                      (pinnedItemType.lowercased() == "artist" && result.type == .artist)
+                            
+                            if shouldShowCheckmark {
+                                let isSelected = selectedPinnedItemIds.contains(result.id)
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundColor(isSelected ? .purple : .gray)
+                                    .frame(width: 28)
+                            } else {
+                                Color.clear.frame(width: 28)
+                            }
+                            
+                            SearchResultCard(result: result) {
+                                handleResultTap(result)
+                            }
+                        }
+                    } else if listSelectionMode {
+                        // List selection mode: show checkmark indicator
+                        HStack(spacing: 12) {
+                            // Selection indicator
+                            Image(systemName: selectedSongIds.contains(result.id) ? "checkmark.circle.fill" : "circle")
+                                .font(.title2)
+                                .foregroundColor(selectedSongIds.contains(result.id) ? .purple : .gray)
+                                .frame(width: 28)
+                            
+                            SearchResultCard(result: result) {
+                                handleResultTap(result)
+                            }
+                        }
+                    } else {
+                        SearchResultCard(result: result) {
+                            handleResultTap(result)
+                        }
                     }
                 }
             }
@@ -1407,6 +2170,18 @@ struct ComprehensiveSearchView: View {
             .padding(.bottom, 100)
         }
         .background(Color(.systemGroupedBackground))
+        .refreshable {
+            // Pull to refresh: rerun the current search query if present
+            if !searchText.isEmpty {
+                await MainActor.run {
+                    performSearch(query: searchText)
+                }
+            } else {
+                await MainActor.run {
+                    loadRecentlyTappedItems()
+                }
+            }
+        }
     }
     
     // MARK: - Spotify Helper Methods
@@ -1465,36 +2240,18 @@ struct ComprehensiveSearchView: View {
     }
     
     private func getSpotifyRecentlyAdded() -> [MusicSearchResult] {
-        // Return demo data for recently added Spotify songs only
-        return [
-            MusicSearchResult(
-                id: "spotify_recent_1",
-                title: "As It Was",
-                artistName: "Harry Styles",
-                albumName: "Harry's House",
-                artworkURL: nil,
-                itemType: "song",
-                popularity: 95
-            ),
-            MusicSearchResult(
-                id: "spotify_recent_2",
-                title: "Heat Waves",
-                artistName: "Glass Animals",
-                albumName: "Dreamland",
-                artworkURL: nil,
-                itemType: "song",
-                popularity: 89
-            ),
-            MusicSearchResult(
-                id: "spotify_recent_3",
-                title: "Good 4 U",
-                artistName: "Olivia Rodrigo",
-                albumName: "SOUR",
-                artworkURL: nil,
-                itemType: "song",
-                popularity: 88
-            )
-        ]
+        print("🔍 [ComprehensiveSearchView] getSpotifyRecentlyAdded() called")
+        // Return real saved tracks from Spotify API
+        let savedTracks = unifiedLibraryService.getSpotifySavedTracks()
+        print("🔍 [ComprehensiveSearchView] Got \(savedTracks.count) saved tracks from service")
+        
+        // Return the first 10 tracks (most recent)
+        let result = Array(savedTracks.prefix(10))
+        print("🔍 [ComprehensiveSearchView] Returning \(result.count) tracks for Recently Added")
+        if result.count > 0 {
+            print("🔍 [ComprehensiveSearchView] First track in UI: \(result[0].title) by \(result[0].artistName)")
+        }
+        return result
     }
     
     private var spotifyAuthorizationRequiredView: some View {
@@ -1601,26 +2358,67 @@ struct ComprehensiveSearchView: View {
         ]
     }
     
+    
+    // MARK: - Spotify Playlist Loading
+    
+    private func loadSpotifyPlaylistDetail(_ playlist: UnifiedLibraryService.UnifiedPlaylist) async {
+        isLoadingSpotifyPlaylist = true
+        selectedSpotifyPlaylist = playlist
+        
+        // Fetch playlist tracks from Spotify API
+        let tracks = await spotifyService.getPlaylistTracks(playlistId: playlist.id)
+        
+        // Convert to MusicSearchResult
+        spotifyPlaylistSongs = tracks.map { track in
+            MusicSearchResult(
+                id: track.id,
+                title: track.name,
+                artistName: track.artists.first?.name ?? "",
+                albumName: track.album.name,
+                artworkURL: track.album.images.first?.url,
+                itemType: "song",
+                popularity: track.popularity
+            )
+        }
+        
+        isLoadingSpotifyPlaylist = false
+        
+        // Present as fullScreenCover modal
+        await MainActor.run {
+            showSpotifyPlaylist = true
+        }
+    }
+    
     private func handleLibraryItemTap(_ item: LibraryItem) {
+        print("🎯 [Performance] Library item tapped: \(item.title)")
+        let startTime = Date()
+        
         let musicResult = item.toMusicSearchResult()
         
-        // Add to recent items
-        let recentItem = RecentItem(
-            type: RecentItemType(rawValue: item.itemType.rawValue) ?? .song,
-            itemId: item.id,
-            title: item.title,
-            subtitle: item.artistName,
-            artworkURL: item.artworkURL
-        )
-        recentItemsStore.upsert(recentItem)
+        // Add to recent items asynchronously (don't block navigation)
+        Task.detached(priority: .background) {
+            let recentItem = RecentItem(
+                type: RecentItemType(rawValue: item.itemType.rawValue) ?? .song,
+                itemId: item.id,
+                title: item.title,
+                subtitle: item.artistName,
+                artworkURL: item.artworkURL
+            )
+            await MainActor.run {
+                self.recentItemsStore.upsert(recentItem)
+            }
+        }
         
-        // Navigate to profile
+        // Navigate immediately (don't wait for recent items)
         if item.itemType == .artist {
             selectedArtistForProfile = item.artistName
             showArtistProfile = true
-                    } else {
+        } else {
             selectedMusicResult = musicResult
         }
+        
+        let elapsedTime = Date().timeIntervalSince(startTime)
+        print("🎯 [Performance] Navigation triggered in \(String(format: "%.3f", elapsedTime))s")
     }
     
     private func handleSearchTextChange(_ newValue: String) {
@@ -1681,7 +2479,7 @@ struct ComprehensiveSearchView: View {
         var request = MusicCatalogSearchRequest(term: query, types: [MusicKit.Song.self, MusicKit.Artist.self, MusicKit.Album.self])
         request.limit = 25
         
-                let response = try await request.response()
+        let response = try await request.response()
                 
         // Helper to normalize titles for deduplication
         func normalizeTitle(_ title: String) -> String {
@@ -1731,13 +2529,106 @@ struct ComprehensiveSearchView: View {
             }
         }
         
+        // Search users in Firestore
+        let userResults = await searchUsers(query: query)
+        
         // Create results structure
         var results = SearchResults()
         results.songs = songResults
         results.artists = artistResults
         results.albums = albumResults
+        results.users = userResults
         
         return results
+    }
+    
+    private func searchUsers(query: String) async -> [any SearchResult] {
+        guard let currentUserId = Auth.auth().currentUser?.uid else {
+            return []
+        }
+        
+        let normalizedQuery = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else {
+            return []
+        }
+        
+        let db = Firestore.firestore()
+        var allUsers: [UserProfile] = []
+        
+        // Get current user's following list to identify friends/followers
+        var followingSet: Set<String> = []
+        var followersSet: Set<String> = []
+        
+        do {
+            // Get user's following
+            let followingSnapshot = try await db.collection("users")
+                .document(currentUserId)
+                .collection("following")
+                .getDocuments()
+            followingSet = Set(followingSnapshot.documents.map { $0.documentID })
+            
+            // Get user's followers
+            let followersSnapshot = try await db.collection("users")
+                .document(currentUserId)
+                .collection("followers")
+                .getDocuments()
+            followersSet = Set(followersSnapshot.documents.map { $0.documentID })
+        } catch {
+            print("❌ Error fetching user relationships: \(error)")
+        }
+        
+        do {
+            // Search by username (starts with query)
+            let usernameSnapshot = try await db.collection("users")
+                .whereField("username", isGreaterThanOrEqualTo: normalizedQuery)
+                .whereField("username", isLessThan: normalizedQuery + "\u{f8ff}")
+                .limit(to: 20)
+                .getDocuments()
+            
+            let usernameUsers = usernameSnapshot.documents.compactMap { doc -> UserProfile? in
+                try? doc.data(as: UserProfile.self)
+            }
+            allUsers.append(contentsOf: usernameUsers)
+            
+            // Search by displayName (case-insensitive, starts with query)
+            let displayNameSnapshot = try await db.collection("users")
+                .whereField("displayName", isGreaterThanOrEqualTo: query)
+                .whereField("displayName", isLessThan: query + "\u{f8ff}")
+                .limit(to: 20)
+                .getDocuments()
+            
+            let displayNameUsers = displayNameSnapshot.documents.compactMap { doc -> UserProfile? in
+                try? doc.data(as: UserProfile.self)
+            }
+            allUsers.append(contentsOf: displayNameUsers)
+            
+            // Remove duplicates and current user
+            var seenUserIds: Set<String> = []
+            allUsers = allUsers.filter { user in
+                guard user.uid != currentUserId && !seenUserIds.contains(user.uid) else {
+                    return false
+                }
+                seenUserIds.insert(user.uid)
+                return true
+            }
+            
+            // Limit to 20 total results
+            allUsers = Array(allUsers.prefix(20))
+            
+            // Convert to search results with friend/follower info
+            let userResults: [any SearchResult] = allUsers.map { user in
+                let isFriend = followingSet.contains(user.uid)
+                let isFollower = followersSet.contains(user.uid)
+                return UserSearchResult(from: user, isFriend: isFriend, isFollower: isFollower)
+            }
+            
+            print("✅ Found \(userResults.count) user results for '\(query)'")
+            return userResults
+            
+        } catch {
+            print("❌ Error searching users: \(error)")
+            return []
+        }
     }
     
     private func addToRecentSearches(_ query: String) {
@@ -1752,6 +2643,46 @@ struct ComprehensiveSearchView: View {
         // MODIFIED: In prompt selection mode, only show songs
         if promptSelectionMode {
             return searchResults.songs
+        }
+        
+        // MODIFIED: In list selection mode, only show songs
+        if listSelectionMode {
+            return searchResults.songs
+        }
+        
+        // MODIFIED: In pinned selection mode, only show the specified item type
+        if pinnedSelectionMode {
+            switch pinnedItemType.lowercased() {
+            case "song":
+                return searchResults.songs
+            case "album":
+                return searchResults.albums
+            case "artist":
+                return searchResults.artists
+            default:
+                return []
+            }
+        }
+        
+        // MODIFIED: In listen later selection mode, show songs, albums, and artists only
+        if listenLaterSelectionMode {
+            switch selectedFilter {
+            case .all:
+                // Combine songs, albums, and artists
+                var allResults: [any SearchResult] = []
+                allResults.append(contentsOf: searchResults.songs)
+                allResults.append(contentsOf: searchResults.albums)
+                allResults.append(contentsOf: searchResults.artists)
+                return allResults
+            case .songs:
+                return searchResults.songs
+            case .albums:
+                return searchResults.albums
+            case .artists:
+                return searchResults.artists
+            default:
+                return []
+            }
         }
         
         // Regular filtering for main search
@@ -1805,6 +2736,55 @@ struct ComprehensiveSearchView: View {
         // Add to recently tapped items
         addToRecentlyTapped(result)
         
+        // MODIFIED: Check if we're in listen later selection mode
+        if listenLaterSelectionMode {
+            // Toggle selection for songs, albums, and artists
+            if result.type == .song || result.type == .album || result.type == .artist {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if selectedItemIds.contains(result.id) {
+                        selectedItemIds.remove(result.id)
+                    } else {
+                        selectedItemIds.insert(result.id)
+                    }
+                }
+            }
+            return
+        }
+        
+        // MODIFIED: Check if we're in pinned selection mode
+        if pinnedSelectionMode {
+            // Toggle selection for the specified item type
+            let shouldSelect = (pinnedItemType.lowercased() == "song" && result.type == .song) ||
+                              (pinnedItemType.lowercased() == "album" && result.type == .album) ||
+                              (pinnedItemType.lowercased() == "artist" && result.type == .artist)
+            
+            if shouldSelect {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if selectedPinnedItemIds.contains(result.id) {
+                        selectedPinnedItemIds.remove(result.id)
+                    } else {
+                        selectedPinnedItemIds.insert(result.id)
+                    }
+                }
+            }
+            return
+        }
+        
+        // MODIFIED: Check if we're in list selection mode
+        if listSelectionMode {
+            // Toggle selection for songs
+            if result.type == .song {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if selectedSongIds.contains(result.id) {
+                        selectedSongIds.remove(result.id)
+                    } else {
+                        selectedSongIds.insert(result.id)
+                    }
+                }
+            }
+            return
+        }
+        
         // MODIFIED: Check if we're in prompt selection mode
         if promptSelectionMode {
             // Convert SearchResult to MusicSearchResult for prompt selection
@@ -1843,9 +2823,44 @@ struct ComprehensiveSearchView: View {
             selectedArtistForProfile = result.title
             showArtistProfile = true
         case .user:
-            // User search results not implemented yet
-            print("⚠️ User search results not implemented yet")
-            break
+            if let userResult = result as? UserSearchResult {
+                print("🎯 Prefetching user profile: \(userResult.username)")
+                // Prefetch the profile data to prevent crashes
+                Task {
+                    do {
+                        let snapshot = try await Firestore.firestore()
+                            .collection("users")
+                            .document(userResult.id)
+                            .getDocument()
+                        
+                        if let data = snapshot.data() {
+                            let profile = try Firestore.Decoder().decode(UserProfile.self, from: data)
+                            await MainActor.run {
+                                print("✅ Prefetched profile for: \(profile.displayName)")
+                                self.prefetchedUserProfile = profile
+                                self.selectedUserIdForProfile = userResult.id
+                                self.showUserProfile = true
+                            }
+                        } else {
+                            // Profile document doesn't exist, open anyway with just userId
+                            await MainActor.run {
+                                print("⚠️ No profile data found, opening with userId only")
+                                self.prefetchedUserProfile = nil
+                                self.selectedUserIdForProfile = userResult.id
+                                self.showUserProfile = true
+                            }
+                        }
+                    } catch {
+                        // Handle error but still try to open profile
+                        print("❌ Error prefetching profile: \(error.localizedDescription)")
+                        await MainActor.run {
+                            self.prefetchedUserProfile = nil
+                            self.selectedUserIdForProfile = userResult.id
+                            self.showUserProfile = true
+                        }
+                    }
+                }
+            }
         case .list:
             // List search results not implemented yet
             print("⚠️ List search results not implemented yet")
@@ -1882,6 +2897,55 @@ struct ComprehensiveSearchView: View {
         recentlyTappedItems.insert(item, at: 0)
         saveRecentlyTappedItems()
         
+        // MODIFIED: Check if we're in listen later selection mode
+        if listenLaterSelectionMode {
+            // Allow selecting songs, albums, and artists
+            if item.type == .song || item.type == .album || item.type == .artist {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if selectedItemIds.contains(item.id) {
+                        selectedItemIds.remove(item.id)
+                    } else {
+                        selectedItemIds.insert(item.id)
+                    }
+                }
+            }
+            return
+        }
+        
+        // MODIFIED: Check if we're in pinned selection mode
+        if pinnedSelectionMode {
+            // Allow selecting the specified item type
+            let shouldSelect = (pinnedItemType.lowercased() == "song" && item.type == .song) ||
+                              (pinnedItemType.lowercased() == "album" && item.type == .album) ||
+                              (pinnedItemType.lowercased() == "artist" && item.type == .artist)
+            
+            if shouldSelect {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if selectedPinnedItemIds.contains(item.id) {
+                        selectedPinnedItemIds.remove(item.id)
+                    } else {
+                        selectedPinnedItemIds.insert(item.id)
+                    }
+                }
+            }
+            return
+        }
+        
+        // MODIFIED: Check if we're in list selection mode
+        if listSelectionMode {
+            // Only allow selecting songs
+            if item.type == .song {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if selectedSongIds.contains(item.id) {
+                        selectedSongIds.remove(item.id)
+                    } else {
+                        selectedSongIds.insert(item.id)
+                    }
+                }
+            }
+            return
+        }
+        
         // MODIFIED: Check if we're in prompt selection mode
         if promptSelectionMode {
             let musicResult = MusicSearchResult(
@@ -1914,8 +2978,42 @@ struct ComprehensiveSearchView: View {
             selectedArtistForProfile = item.title
             showArtistProfile = true
         case .user:
-            // User profile navigation not implemented yet
-            break
+            print("🎯 Prefetching user profile from Recently Tapped: \(item.id)")
+            // Prefetch the profile data to prevent crashes
+            Task {
+                do {
+                    let snapshot = try await Firestore.firestore()
+                        .collection("users")
+                        .document(item.id)
+                        .getDocument()
+                    
+                    if let data = snapshot.data() {
+                        let profile = try Firestore.Decoder().decode(UserProfile.self, from: data)
+                        await MainActor.run {
+                            print("✅ Prefetched profile from recently tapped: \(profile.displayName)")
+                            self.prefetchedUserProfile = profile
+                            self.selectedUserIdForProfile = item.id
+                            self.showUserProfile = true
+                        }
+                    } else {
+                        // Profile document doesn't exist, open anyway with just userId
+                        await MainActor.run {
+                            print("⚠️ No profile data found, opening with userId only")
+                            self.prefetchedUserProfile = nil
+                            self.selectedUserIdForProfile = item.id
+                            self.showUserProfile = true
+                        }
+                    }
+                } catch {
+                    // Handle error but still try to open profile
+                    print("❌ Error prefetching profile: \(error.localizedDescription)")
+                    await MainActor.run {
+                        self.prefetchedUserProfile = nil
+                        self.selectedUserIdForProfile = item.id
+                        self.showUserProfile = true
+                    }
+                }
+            }
         case .list:
             // List navigation not implemented yet
             break
@@ -1923,16 +3021,11 @@ struct ComprehensiveSearchView: View {
     }
     
     private func saveRecentlyTappedItems() {
-        if let encoded = try? JSONEncoder().encode(recentlyTappedItems) {
-            UserDefaults.standard.set(encoded, forKey: "recently_tapped_items")
-        }
+        recentlyTappedItems = RecentlyTappedStore.save(recentlyTappedItems)
     }
     
     private func loadRecentlyTappedItems() {
-        if let data = UserDefaults.standard.data(forKey: "recently_tapped_items"),
-           let decoded = try? JSONDecoder().decode([RecentlyTappedItem].self, from: data) {
-            recentlyTappedItems = decoded
-        }
+        recentlyTappedItems = RecentlyTappedStore.load()
     }
     
     private func validateSelectedTab() {
@@ -1964,6 +3057,8 @@ struct ComprehensiveSearchView: View {
                 
                 TextField("Search your library", text: $librarySearchText)
                     .textFieldStyle(PlainTextFieldStyle())
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
                 
                 if !librarySearchText.isEmpty {
                     Button(action: {
@@ -2186,56 +3281,46 @@ struct SpotifyRecentlyAddedCard: View {
     let item: MusicSearchResult
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Artwork (matching Apple Music design exactly)
-            if let artworkUrl = item.artworkURL, let url = URL(string: artworkUrl) {
-                CachedAsyncImage(url: url) { image in
+        VStack(spacing: 0) {
+            // Album artwork - matching Apple Music exactly
+            AsyncImage(url: item.artworkURL != nil ? URL(string: item.artworkURL!) : nil) { phase in
+                if let image = phase.image {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    artworkPlaceholder
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.gray.opacity(0.3))
+                        .overlay(
+                            Image(systemName: "music.note")
+                                .foregroundColor(.gray)
+                                .font(.system(size: 24))
+                        )
                 }
-                .frame(width: 100, height: 100)
-                .cornerRadius(item.itemType == "artist" ? 50 : 6)
-                .clipped()
-            } else {
-                artworkPlaceholder
             }
+            .frame(width: 120, height: 120)
+            .cornerRadius(8)
+            .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
             
-            VStack(alignment: .leading, spacing: 4) {
+            // Fixed height text container - matching Apple Music
+            VStack(alignment: .leading, spacing: 3) {
                 Text(item.title)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .lineLimit(1)
+                    .font(.system(size: 14, weight: .medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
                 
                 Text(item.artistName)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 12))
                     .lineLimit(1)
-            }
-        }
-        .frame(width: 100)
-    }
-    
-    private var artworkPlaceholder: some View {
-        RoundedRectangle(cornerRadius: item.itemType == "artist" ? 50 : 6)
-            .fill(Color(.systemGray4))
-            .frame(width: 100, height: 100)
-            .overlay(
-                Image(systemName: getIcon(for: item.itemType))
-                    .font(.title2)
                     .foregroundColor(.secondary)
-            )
-    }
-    
-    private func getIcon(for type: String) -> String {
-        switch type {
-        case "song": return "music.note"
-        case "album": return "opticaldisc"
-        case "artist": return "person.fill"
-        default: return "music.note"
+            }
+            .frame(width: 120, alignment: .leading)
+            .frame(height: 50) // Fixed height to prevent layout shifts
+            .padding(.top, 6)
         }
+        .frame(width: 120)
     }
 }
 
@@ -2353,6 +3438,377 @@ struct SpotifySongRow: View {
     }
 }
 
+
+
+
+
+// MARK: - Spotify Song Grid Card (matching Apple Music format)
+struct SpotifySongGridCard: View {
+    let song: MusicSearchResult
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 6) {
+                // Song artwork - 100x100 matching Apple Music
+                if let artworkUrl = song.artworkURL, let url = URL(string: artworkUrl) {
+                    CachedAsyncImage(url: url) { image in
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        songPlaceholder
+                    }
+                    .frame(width: 100, height: 100)
+                    .cornerRadius(8)
+                    .clipped()
+                } else {
+                    songPlaceholder
+                        .frame(width: 100, height: 100)
+                        .cornerRadius(8)
+                }
+                
+                // Song title - matching Apple Music font and spacing
+                Text(song.title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 100, alignment: .leading)
+                
+                // Artist name - matching Apple Music
+                Text(song.artistName)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 100, alignment: .leading)
+            }
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    private var songPlaceholder: some View {
+        Rectangle()
+            .fill(Color.blue.opacity(0.3))
+            .overlay(
+                Image(systemName: "music.note")
+                    .foregroundColor(.blue)
+                    .font(.title2)
+            )
+    }
+}
+
+// MARK: - Spotify Playlist Grid Card (matching Apple Music format)
+struct SpotifyPlaylistGridCard: View {
+    let playlist: UnifiedLibraryService.UnifiedPlaylist
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 8) {
+                // Playlist artwork - 120x120 matching Apple Music
+                if let artworkUrl = playlist.artworkURL, let url = URL(string: artworkUrl) {
+                    CachedAsyncImage(url: url) { image in
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        playlistPlaceholder
+                    }
+                    .frame(width: 120, height: 120)
+                    .cornerRadius(8)
+                    .clipped()
+                } else {
+                    playlistPlaceholder
+                        .frame(width: 120, height: 120)
+                        .cornerRadius(8)
+                }
+                
+                // Playlist name - matching Apple Music font and spacing
+                Text(playlist.name)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 120, alignment: .leading)
+                
+                // Song count - matching Apple Music
+                Text("\(playlist.trackCount) songs")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 120, alignment: .leading)
+            }
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    private var playlistPlaceholder: some View {
+        Rectangle()
+            .fill(Color.purple.opacity(0.3))
+            .overlay(
+                Image(systemName: "music.note.list")
+                    .foregroundColor(.purple)
+                    .font(.title2)
+            )
+    }
+}
+
+// MARK: - Spotify Playlist Row Button
+struct SpotifyPlaylistRowButton: View {
+    let playlist: UnifiedLibraryService.UnifiedPlaylist
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                // Playlist artwork - show real artwork if available
+                AsyncImage(url: playlist.artworkURL != nil ? URL(string: playlist.artworkURL!) : nil) { phase in
+                    if let image = phase.image {
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(.systemGray4))
+                            .overlay(
+                                Image(systemName: "music.note.list")
+                                    .foregroundColor(.secondary)
+                            )
+                    }
+                }
+                .frame(width: 50, height: 50)
+                .cornerRadius(6)
+                .clipped()
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(playlist.name)
+                        .font(.body)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    
+                    Text("\(playlist.trackCount) songs")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+
+// MARK: - Spotify Playlist Detail View
+struct SpotifyPlaylistDetailView: View {
+    let playlist: UnifiedLibraryService.UnifiedPlaylist
+    let songs: [MusicSearchResult]
+    let isLoading: Bool
+    let onSongTap: (MusicSearchResult) -> Void
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Playlist header (matching Apple Music format)
+                playlistHeaderSection
+                
+                // Songs list
+                if isLoading {
+                    LibraryLoadingView(message: "Loading playlist songs...")
+                        .frame(maxHeight: .infinity)
+                } else if songs.isEmpty {
+                    LibraryEmptyState(
+                        title: "No Songs",
+                        subtitle: "This playlist doesn't contain any songs.",
+                        icon: "music.note"
+                    )
+                    .frame(maxHeight: .infinity)
+                } else {
+                    songsListView
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+                
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Button(action: { /* Add shuffle functionality */ }) {
+                            Label("Shuffle", systemImage: "shuffle")
+                        }
+                        Button(action: { /* Add play functionality */ }) {
+                            Label("Play", systemImage: "play.fill")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Playlist Header
+    private var playlistHeaderSection: some View {
+                    VStack(spacing: 16) {
+            HStack(spacing: 16) {
+                // Playlist artwork
+                if let artworkUrl = playlist.artworkURL, let url = URL(string: artworkUrl) {
+                    CachedAsyncImage(url: url) { image in
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        playlistPlaceholder
+                    }
+                    .frame(width: 140, height: 140)
+                    .cornerRadius(12)
+                    .clipped()
+                } else {
+                    playlistPlaceholder
+                        .frame(width: 140, height: 140)
+                        .cornerRadius(12)
+                }
+                
+                // Playlist info
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(playlist.name)
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.primary)
+                        .multilineTextAlignment(.leading)
+                    
+                    Text("\(songs.count) songs")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                            }
+                            .padding(.horizontal, 20)
+        }
+        .padding(.vertical, 16)
+        .background(Color(.systemBackground))
+                        }
+    
+    // MARK: - Songs List
+    private var songsListView: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
+                    SpotifyPlaylistSongRow(
+                        song: song,
+                        trackNumber: index + 1,
+                        onTap: { onSongTap(song) }
+                    )
+                    
+                    if song.id != songs.last?.id {
+                        Divider()
+                            .padding(.leading, 70)
+                }
+            }
+            }
+            .padding(.vertical, 8)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+    
+    // MARK: - Helper Views
+    private var playlistPlaceholder: some View {
+        Rectangle()
+            .fill(Color.purple.opacity(0.3))
+            .overlay(
+                Image(systemName: "music.note.list")
+                    .foregroundColor(.purple)
+                    .font(.title)
+            )
+    }
+}
+
+// MARK: - Spotify Playlist Song Row (matching Apple Music format)
+struct SpotifyPlaylistSongRow: View {
+    let song: MusicSearchResult
+    let trackNumber: Int
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                // Track number
+                Text("\(trackNumber)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(width: 30, alignment: .leading)
+                
+                // Song artwork
+                if let artworkUrl = song.artworkURL, let url = URL(string: artworkUrl) {
+                    CachedAsyncImage(url: url) { image in
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        songPlaceholder
+                    }
+                    .frame(width: 40, height: 40)
+                    .cornerRadius(6)
+                    .clipped()
+                } else {
+                    songPlaceholder
+                        .frame(width: 40, height: 40)
+                        .cornerRadius(6)
+                }
+                
+                // Song info
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(song.title)
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    
+                    Text(song.artistName)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                // More options
+                Button(action: { /* Add more options */ }) {
+                    Image(systemName: "ellipsis")
+                        .foregroundColor(.gray)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    private var songPlaceholder: some View {
+        Rectangle()
+            .fill(Color.blue.opacity(0.3))
+            .overlay(
+                Image(systemName: "music.note")
+                    .foregroundColor(.blue)
+                    .font(.caption)
+            )
+    }
+}
 
 #Preview {
     ComprehensiveSearchView()

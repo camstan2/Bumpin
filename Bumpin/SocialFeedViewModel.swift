@@ -13,7 +13,9 @@ struct TrendingItem: Identifiable, Codable {
     let logCount: Int // Number of logs in last 24 hours
     let averageRating: Double?
     let itemType: String // "song", "album", "artist"
-    let itemId: String // Apple Music ID
+    let itemId: String // Universal ID or identifier for grouping
+    let appleMusicId: String? // Original Apple Music ID for fetching
+    let totalRatings: Int?
     
     enum ItemType: String, CaseIterable {
         case song = "song"
@@ -21,7 +23,18 @@ struct TrendingItem: Identifiable, Codable {
         case artist = "artist"
     }
     
-    init(id: String = UUID().uuidString, title: String, subtitle: String? = nil, artworkUrl: String? = nil, logCount: Int, averageRating: Double? = nil, itemType: String, itemId: String) {
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        subtitle: String? = nil,
+        artworkUrl: String? = nil,
+        logCount: Int,
+        averageRating: Double? = nil,
+        itemType: String,
+        itemId: String,
+        appleMusicId: String? = nil,
+        totalRatings: Int? = nil
+    ) {
         self.id = id
         self.title = title
         self.subtitle = subtitle
@@ -30,6 +43,36 @@ struct TrendingItem: Identifiable, Codable {
         self.averageRating = averageRating
         self.itemType = itemType
         self.itemId = itemId
+        self.appleMusicId = appleMusicId ?? itemId // Default to itemId if not provided
+        self.totalRatings = totalRatings
+    }
+    
+    func withAverageRating(_ rating: Double, totalRatings: Int) -> TrendingItem {
+        let normalized = TrendingItem.normalizedAverage(from: rating)
+        return TrendingItem(
+            id: id,
+            title: title,
+            subtitle: subtitle,
+            artworkUrl: artworkUrl,
+            logCount: logCount,
+            averageRating: normalized,
+            itemType: itemType,
+            itemId: itemId,
+            appleMusicId: appleMusicId,
+            totalRatings: totalRatings
+        )
+    }
+}
+
+extension TrendingItem {
+    static func normalizedAverage(from rating: Double) -> Double {
+        let clamped = max(0.0, min(5.0, rating))
+        return (clamped * 10).rounded() / 10
+    }
+    
+    static func normalizedAverage(optional rating: Double?) -> Double? {
+        guard let rating else { return nil }
+        return Self.normalizedAverage(from: rating)
     }
 }
 
@@ -47,11 +90,11 @@ struct FriendActivity: Identifiable, Codable {
     let songTitle: String
     let artistName: String
     let artworkUrl: String?
-    let rating: Int?
+    let rating: Double?
     let loggedAt: Date
     let musicLog: MusicLog?
     
-    init(id: String = UUID().uuidString, userId: String, username: String, userProfilePictureUrl: String? = nil, songTitle: String, artistName: String, artworkUrl: String? = nil, rating: Int? = nil, loggedAt: Date, musicLog: MusicLog? = nil) {
+    init(id: String = UUID().uuidString, userId: String, username: String, userProfilePictureUrl: String? = nil, songTitle: String, artistName: String, artworkUrl: String? = nil, rating: Double? = nil, loggedAt: Date, musicLog: MusicLog? = nil) {
         self.id = id
         self.userId = userId
         self.username = username
@@ -103,6 +146,13 @@ class SocialFeedViewModel: ObservableObject {
     @Published var todaysHot: [TrendingItem] = []
     private var todaysHotPageIndex: Int = 1
     private let todaysHotPageSize: Int = 20
+    private func logDebug(_ message: String) {
+        AppLogger.debug(message, category: .socialFeed)
+    }
+    
+    private func logError(_ message: String) {
+        AppLogger.error(message, category: .socialFeed)
+    }
     @Published var friendsActivity: [FriendActivity] = []
     
     @Published var allTrendingSongs: [TrendingItem] = []
@@ -136,7 +186,8 @@ class SocialFeedViewModel: ObservableObject {
     @Published var showAllWeeklyPopular = false
     // Genres
     @Published var availableGenres: [String] = ["hip-hop", "pop", "indie", "r&b", "electronic", "rock", "country", "latin", "k-pop", "jazz", "metal", "classical"]
-    @Published var selectedGenre: String = UserDefaults.standard.string(forKey: "selectedGenre") ?? "hip-hop"
+    @Published var selectedGenre: String = UserDefaults.standard.string(forKey: "selectedGenre") ?? "Hip-Hop"
+    @Published var activeGenreFilter: String = UserDefaults.standard.string(forKey: "selectedGenre") ?? "Hip-Hop"
     @Published var genreTrending: [TrendingItem] = []
     @Published var allGenreTrending: [TrendingItem] = []
     @Published var isLoadingGenre = false
@@ -209,10 +260,14 @@ class SocialFeedViewModel: ObservableObject {
     
     private let db = Firestore.firestore()
     private let calendar = Calendar.current
+    private let feedService = SocialFeedService.shared
     private var topLogListener: ListenerRegistration?
     private var lastSeenTopDate: Date?
     private let storiesService = TrendingStoriesService.shared
     @Published var genreStories: [TrendingStory] = []
+    
+    // Genre loading coordination
+    private var genreLoadToken: Int = 0
 
     // Popular module removed per redesign
     
@@ -220,7 +275,16 @@ class SocialFeedViewModel: ObservableObject {
     
     func loadAllData() {
         #if DEBUG
+        // Explicitly set to false if this is the first time (to override any old cached true value)
+        if UserDefaults.standard.object(forKey: "feed.mockData.initialized") == nil {
+            UserDefaults.standard.set(false, forKey: "feed.mockData")
+            UserDefaults.standard.set(true, forKey: "feed.mockData.initialized")
+            logDebug("🔧 Initialized feed.mockData to FALSE (real data) on first launch")
+        }
+        
+        // Check if mock data is explicitly enabled (default is now FALSE for real data)
         if UserDefaults.standard.bool(forKey: "feed.mockData") {
+            logDebug("📊 Loading MOCK data (feed.mockData is enabled)")
             // Populate with mock data for design review
             let allSongs = MockSocialData.trendingItems(count: 36, type: "song")
             self.allTrendingSongs = allSongs
@@ -298,23 +362,47 @@ class SocialFeedViewModel: ObservableObject {
             self.allTrendingAlbums = cached
             self.trendingAlbums = Array(cached.prefix(10))
         }
-        loadTrendingSongs()
-        loadTrendingArtists()
-        loadTrendingAlbums()
-        buildTodaysHot(reset: true)
-        loadFriendsActivity()
-        Task { await loadFriendsPopularCombinedAsync(reset: true) }
-        Task { await loadGenreTrendingAsync(for: selectedGenre) }
-        Task { await loadGenreStoriesAsync(for: selectedGenre) }
-        Task { await loadGenreTrendingArtistsAsync(for: selectedGenre) }
-        Task { await loadGenreTrendingAlbumsAsync(for: selectedGenre) }
-        Task { await loadGenrePopularFriendsAsync(for: selectedGenre) }
-        Task { await loadGenrePopularFriendsCombinedAsync(for: selectedGenre) }
-        Task { await loadCreatorsSpotlightAsync() }
-        Task { await loadNowPlayingCreatorsAsync() }
-        Task { await loadNowPlayingFriendsAsync() }
-        Task { await loadWeeklyPopularAsync(reset: true) }
-        Task { await loadGenreWeeklyPopularAsync(for: selectedGenre, reset: true) }
+        // PERFORMANCE OPTIMIZATION: Load all data in parallel using TaskGroup
+        let startTime = Date()
+        logDebug("⏱️ [SocialFeed] Starting parallel data load...")
+        
+        Task {
+            await withTaskGroup(of: Void.self) { group in
+                // Critical data: Load first (trending, friends activity)
+                group.addTask { await self.loadTrendingSongsAsync() }
+                group.addTask { await self.loadTrendingArtistsAsync() }
+                group.addTask { await self.loadTrendingAlbumsAsync() }
+                group.addTask { await self.loadFriendsActivityAsync() }
+                
+                // Friends popular data
+                group.addTask { await self.loadFriendsPopularCombinedAsync(reset: true) }
+                group.addTask { await self.loadNowPlayingFriendsAsync() }
+                group.addTask { await self.loadWeeklyPopularAsync(reset: true) }
+                
+                // Genre-specific data
+                group.addTask { await self.loadGenreTrendingAsync(for: self.selectedGenre) }
+                group.addTask { await self.loadGenreStoriesAsync(for: self.selectedGenre) }
+                group.addTask { await self.loadGenreTrendingArtistsAsync(for: self.selectedGenre) }
+                group.addTask { await self.loadGenreTrendingAlbumsAsync(for: self.selectedGenre) }
+                group.addTask { await self.loadGenrePopularFriendsAsync(for: self.selectedGenre) }
+                group.addTask { await self.loadGenrePopularFriendsCombinedAsync(for: self.selectedGenre) }
+                group.addTask { await self.loadGenreWeeklyPopularAsync(for: self.selectedGenre, reset: true) }
+                
+                // Creator/explore data
+                group.addTask { await self.loadCreatorsSpotlightAsync() }
+                group.addTask { await self.loadNowPlayingCreatorsAsync() }
+            }
+            
+            await MainActor.run {
+                self.buildTodaysHot(reset: true)
+                
+                // Load friend data for profile pictures
+                self.loadFriendsDataForItems()
+                
+                let elapsed = Date().timeIntervalSince(startTime)
+                logDebug("⏱️ [SocialFeed] Parallel data load completed in \(Int(elapsed * 1000))ms")
+            }
+        }
     }
 
     func stopLiveListeners() {
@@ -322,9 +410,39 @@ class SocialFeedViewModel: ObservableObject {
     }
     
     @MainActor
+    func prepareGenreLoad(for genre: String) -> Int {
+        selectedGenre = genre
+        activeGenreFilter = genre
+        genreLoadToken &+= 1
+        let token = genreLoadToken
+        
+        // reset data to avoid showing stale content
+        genreTrending = []
+        allGenreTrending = []
+        genreTrendingArtists = []
+        allGenreTrendingArtists = []
+        genreTrendingAlbums = []
+        allGenreTrendingAlbums = []
+        genreFriendsPopularSongs = []
+        allGenreFriendsPopularSongs = []
+        genreFriendsPopularCombined = []
+        allGenreFriendsPopularCombined = []
+        genreWeeklyPopularLogs = []
+        
+        isLoadingGenre = true
+        isLoadingGenreArtists = true
+        isLoadingGenreAlbums = true
+        isLoadingWeeklyPopular = true
+        
+        return token
+    }
+    
+    @MainActor
     func refreshAllData() async {
         #if DEBUG
+        // Check if mock data is explicitly enabled (default is now FALSE for real data)
         if UserDefaults.standard.bool(forKey: "feed.mockData") {
+            logDebug("📊 Refreshing MOCK data (feed.mockData is enabled)")
             await MainActor.run {
                 self.trendingSongs = MockSocialData.trendingItems(count: 12, type: "song")
                 self.allTrendingSongs = MockSocialData.trendingItems(count: 36, type: "song")
@@ -347,12 +465,16 @@ class SocialFeedViewModel: ObservableObject {
             }
             return
         }
+        #else
+        // In release builds, never use mock data
         #endif
+        logDebug("✅ Refreshing REAL data from Firestore")
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.loadTrendingSongsAsync() }
             group.addTask { await self.loadTrendingArtistsAsync() }
             group.addTask { await self.loadTrendingAlbumsAsync() }
             group.addTask { await self.loadFriendsActivityAsync() }
+            group.addTask { await self.loadNowPlayingFriendsAsync() }
         }
         await MainActor.run {
             self.resetVisibleCounts()
@@ -369,44 +491,13 @@ class SocialFeedViewModel: ObservableObject {
         isLoadingTrendingSongs = true
         defer { isLoadingTrendingSongs = false }
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
             let uid = Auth.auth().currentUser?.uid ?? ""
             guard !uid.isEmpty else { return }
-            let userDoc = try await db.collection("users").document(uid).getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Array(Set(followingIds).intersection(Set(followerIds)))
-            guard !mutuals.isEmpty else { self.friendsPopularSongs = []; self.allFriendsPopularSongs = []; return }
-            // Batch query logs by mutuals within window
-            var all: [MusicLog] = []
-            for batch in mutuals.chunked(into: 10) {
-                let snap = try await db.collection("logs")
-                    .whereField("userId", in: batch)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                logs = logs.filter { $0.itemType == "song" && $0.dateLogged >= timeWindow && (($0.isPublic ?? true) == true) }
-                all.append(contentsOf: logs)
-            }
-            // Group and score similar to trending, but using only friends' logs
-            let grouped = Dictionary(grouping: all) { $0.itemId }
-            let items: [TrendingItem] = grouped.compactMap { (itemId, logs) in
-                guard let first = logs.first else { return nil }
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "song", itemId: itemId)
-            }
-            .sorted {
-                let l = PopularityService.scoreFriendsPopular(logs: grouped[$0.itemId] ?? [])
-                let r = PopularityService.scoreFriendsPopular(logs: grouped[$1.itemId] ?? [])
-                return l > r
-            }
+            let items = try await feedService.fetchFriendsPopularSongs(for: uid)
             self.allFriendsPopularSongs = items
             self.friendsPopularSongs = Array(items.prefix(10))
         } catch {
-            print("Friends popular load error: \(error)")
+            logError("Friends popular load error: \(error)")
         }
     }
 
@@ -416,44 +507,13 @@ class SocialFeedViewModel: ObservableObject {
         isLoadingTrendingSongs = true
         defer { isLoadingTrendingSongs = false }
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
             let uid = Auth.auth().currentUser?.uid ?? ""
             guard !uid.isEmpty else { return }
-            let userDoc = try await db.collection("users").document(uid).getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Array(Set(followingIds).intersection(Set(followerIds)))
-            guard !mutuals.isEmpty else { self.friendsPopularCombined = []; self.allFriendsPopularCombined = []; return }
-            var all: [MusicLog] = []
-            for batch in mutuals.chunked(into: 10) {
-                let snap = try await db.collection("logs")
-                    .whereField("userId", in: batch)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 300)
-                    .getDocuments()
-                var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                logs = logs.filter { ["song","album","artist"].contains($0.itemType) && $0.dateLogged >= timeWindow && (($0.isPublic ?? true) == true) }
-                all.append(contentsOf: logs)
-            }
-            let grouped = Dictionary(grouping: all) { ($0.itemType + "|" + $0.itemId) }
-            let items: [TrendingItem] = grouped.compactMap { (_, logs) in
-                guard let first = logs.first else { return nil }
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: first.title, subtitle: first.itemType == "artist" ? nil : first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: first.itemType, itemId: first.itemId)
-            }
-            .sorted { lhs, rhs in
-                let lkey = lhs.itemType + "|" + lhs.itemId
-                let rkey = rhs.itemType + "|" + rhs.itemId
-                let l = PopularityService.scoreFriendsPopular(logs: grouped[lkey] ?? [])
-                let r = PopularityService.scoreFriendsPopular(logs: grouped[rkey] ?? [])
-                return l > r
-            }
+            let items = try await feedService.fetchFriendsPopularCombined(for: uid)
             self.allFriendsPopularCombined = items
             self.friendsPopularCombined = Array(items.prefix(10))
         } catch {
-            print("Friends popular combined load error: \(error)")
+            logError("Friends popular combined load error: \(error)")
         }
     }
 
@@ -463,21 +523,12 @@ class SocialFeedViewModel: ObservableObject {
         do {
             let uid = Auth.auth().currentUser?.uid ?? ""
             guard !uid.isEmpty else { return }
-            let userDoc = try await db.collection("users").document(uid).getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Array(Set(followingIds).intersection(Set(followerIds)))
-            guard !mutuals.isEmpty else { self.nowPlayingFriends = []; return }
-            var results: [UserProfile] = []
-            for batch in mutuals.chunked(into: 10) {
-                let snap = try await db.collection("users").whereField("uid", in: batch).getDocuments()
-                let users = snap.documents.compactMap { try? $0.data(as: UserProfile.self) }
-                results.append(contentsOf: users.filter { $0.showNowPlaying == true })
-            }
+            let results = try await feedService.fetchNowPlayingFriends(for: uid)
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
             self.nowPlayingFriends = results.filter { !hidden.contains($0.uid) }
+            
+            logDebug("🎵 [NowPlaying] Loaded \(self.nowPlayingFriends.count) friends currently listening (filtered stale data)")
         } catch {
             self.nowPlayingFriends = []
         }
@@ -490,19 +541,13 @@ class SocialFeedViewModel: ObservableObject {
         isLoadingWeeklyPopular = true
         defer { isLoadingWeeklyPopular = false }
         do {
-            let now = Date()
-            let oneWeekAgo = calendar.date(byAdding: .day, value: -7, to: now) ?? now
-            var query: Query = db.collection("logs").order(by: "dateLogged", descending: true)
-            if let cursor = weeklyCursorDate { query = query.whereField("dateLogged", isLessThan: cursor) }
-            let snap = try await query.limit(to: 400).getDocuments()
-            var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            logs = logs.filter { $0.dateLogged >= oneWeekAgo && ($0.isPublic ?? true) }
+            let fetched = try await feedService.fetchWeeklyPopularLogs(before: weeklyCursorDate)
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
-            logs.removeAll { hidden.contains($0.userId) }
-            let scored = scoreAndSortLogs(logs)
+            let visible = fetched.filter { !hidden.contains($0.userId) }
+            let scored = scoreAndSortLogs(visible)
             if reset { weeklyPopularLogs = Array(scored.prefix(20)) } else { weeklyPopularLogs.append(contentsOf: scored.prefix(20)) }
-            weeklyCursorDate = logs.last?.dateLogged ?? weeklyCursorDate
+            weeklyCursorDate = fetched.last?.dateLogged ?? weeklyCursorDate
         } catch {
             // keep existing state
         }
@@ -520,26 +565,26 @@ class SocialFeedViewModel: ObservableObject {
 
     // MARK: - Weekly Popular Logs by Genre
     @MainActor
-    func loadGenreWeeklyPopularAsync(for genre: String, reset: Bool) async {
+    func loadGenreWeeklyPopularAsync(for genre: String, reset: Bool, context: Int? = nil) async {
         if reset { genreWeeklyCursorDate = nil }
+        let shouldGuard = context != nil
+        if !shouldGuard {
         isLoadingWeeklyPopular = true
-        defer { isLoadingWeeklyPopular = false }
+        }
         do {
-            let now = Date()
-            let oneWeekAgo = calendar.date(byAdding: .day, value: -7, to: now) ?? now
-            var query: Query = db.collection("logs").whereField("genres", arrayContains: genre).order(by: "dateLogged", descending: true)
-            if let cursor = genreWeeklyCursorDate { query = query.whereField("dateLogged", isLessThan: cursor) }
-            let snap = try await query.limit(to: 400).getDocuments()
-            var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            logs = logs.filter { $0.dateLogged >= oneWeekAgo && ($0.isPublic ?? true) }
+            let fetched = try await feedService.fetchGenreWeeklyPopularLogs(for: genre, before: genreWeeklyCursorDate)
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
-            logs.removeAll { hidden.contains($0.userId) }
-            let scored = scoreAndSortLogs(logs)
+            let visible = fetched.filter { !hidden.contains($0.userId) }
+            let scored = scoreAndSortLogs(visible)
+            if shouldGuard && context != genreLoadToken { return }
             if reset { genreWeeklyPopularLogs = Array(scored.prefix(20)) } else { genreWeeklyPopularLogs.append(contentsOf: scored.prefix(20)) }
-            genreWeeklyCursorDate = logs.last?.dateLogged ?? genreWeeklyCursorDate
+            genreWeeklyCursorDate = fetched.last?.dateLogged ?? genreWeeklyCursorDate
         } catch {
             // keep existing state
+        }
+        if !shouldGuard || context == genreLoadToken {
+            isLoadingWeeklyPopular = false
         }
     }
 
@@ -555,219 +600,179 @@ class SocialFeedViewModel: ObservableObject {
 
     // MARK: - Genre Trending
     @MainActor
-    func loadGenreTrendingAsync(for genre: String) async {
+    func loadGenreTrendingAsync(for genre: String, context: Int? = nil) async {
+        let shouldGuard = context != nil
+        if !shouldGuard {
         isLoadingGenre = true
+        }
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            let logsRaw: [MusicLog]
-            do {
-                let ordered = try await db.collection("logs")
-                    .whereField("genres", arrayContains: genre)
-                    .whereField("dateLogged", isGreaterThan: timeWindow)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                logsRaw = ordered.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            } catch {
-                // Fallback without composite index: order by date and filter client-side
-                let fallback = try await db.collection("logs")
-                    .whereField("genres", arrayContains: genre)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                logsRaw = fallback.documents.compactMap { try? $0.data(as: MusicLog.self) }.filter { $0.dateLogged >= timeWindow }
-            }
+            let logsRaw = try await feedService.fetchGenreLogs(for: genre, limit: 200)
             // Filter out hidden users
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
             let logs = logsRaw.filter { !hidden.contains($0.userId) }
-            let grouped = Dictionary(grouping: logs) { $0.itemId }
-            let items: [TrendingItem] = grouped.compactMap { (itemId, logs) in
+            
+            // Ensure the "Trending Songs" row only contains song logs
+            let songLogs = logs.filter { $0.itemType == "song" }
+            
+            guard !songLogs.isEmpty else {
+                self.genreTrending = []
+                self.allGenreTrending = []
+                self.isLoadingGenre = false
+                return
+            }
+            
+            // 🎯 Phase 3: Group by universalTrackId for cross-platform aggregation
+            let grouped = Dictionary(grouping: songLogs) { log in
+                log.universalTrackId ?? log.itemId // Fallback to itemId for old logs
+            }
+            
+            var items: [TrendingItem] = grouped.compactMap { (trackId, logs) in
                 guard let first = logs.first else { return nil }
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "song", itemId: itemId)
+                
+                logDebug("🎵 Genre Trending: \(first.title) - \(logs.count) logs (universalTrackId: \(trackId))")
+                
+                return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: nil, itemType: "song", itemId: trackId)
             }
             .sorted { calculateTrendingScore(item: $0, logs: grouped[$0.itemId] ?? []) > calculateTrendingScore(item: $1, logs: grouped[$1.itemId] ?? []) }
+            
+            // Enrich with overall ratings from all logs (not just 72-hour window)
+            items = await feedService.enrichWithOverallRatings(items, itemType: "song")
+            
+            if shouldGuard && context != genreLoadToken { return }
             self.genreTrending = Array(items.prefix(10))
             self.allGenreTrending = items
             self.isLoadingGenre = false
         } catch {
-            print("Error loading genre trending: \(error)")
+            logError("Error loading genre trending: \(error)")
+            if shouldGuard && context != genreLoadToken { return }
             self.isLoadingGenre = false
         }
     }
 
     @MainActor
-    func loadGenreTrendingArtistsAsync(for genre: String) async {
+    func loadGenreTrendingArtistsAsync(for genre: String, context: Int? = nil) async {
+        let shouldGuard = context != nil
+        if !shouldGuard {
         isLoadingGenreArtists = true
-        defer { isLoadingGenreArtists = false }
+        }
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            let snap = try await db.collection("logs")
-                .whereField("dateLogged", isGreaterThan: timeWindow)
-                .order(by: "dateLogged", descending: true)
-                .limit(to: 500)
-                .getDocuments()
-            var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            // Optional genre server filter if present
-            if let first = snap.documents.first, first.data().keys.contains("genres") {
-                let genreSnap = try await db.collection("logs")
-                    .whereField("genres", arrayContains: genre)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 500)
-                    .getDocuments()
-                logs = genreSnap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            } else {
-                // client fallback
-                logs = logs.filter { $0.dateLogged >= timeWindow }
+            let logsRaw = try await feedService.fetchGenreLogs(for: genre, limit: 500)
+            await UserPreferencesService.shared.loadHiddenUsers()
+            let hidden = UserPreferencesService.shared.hiddenUserIds
+            let logs = logsRaw.filter { !hidden.contains($0.userId) }
+            
+            var artistLogs: [String: (displayName: String, logs: [MusicLog])] = [:]
+            for log in logs {
+                let artists = ArtistNameParser.splitArtists(from: log.artistName)
+                let targets = artists.isEmpty ? [log.artistName] : artists
+                for artist in targets {
+                    let key = ArtistNameParser.normalizedKey(artist)
+                    guard !key.isEmpty else { continue }
+                    if artistLogs[key] == nil {
+                        artistLogs[key] = (artist, [log])
+                    } else {
+                        artistLogs[key]?.logs.append(log)
+                    }
+                }
             }
-            let grouped = Dictionary(grouping: logs) { $0.artistName }
-            let items: [TrendingItem] = grouped.compactMap { (artist, logs) in
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: artist, subtitle: nil, artworkUrl: logs.first?.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "artist", itemId: artist)
+            
+            var items: [TrendingItem] = artistLogs.compactMap { (key, payload) in
+                TrendingItem(
+                    title: payload.displayName,
+                    subtitle: nil,
+                    artworkUrl: nil,
+                    logCount: payload.logs.count,
+                    averageRating: nil,
+                    itemType: "artist",
+                    itemId: key
+                )
             }
-            .sorted { calculateTrendingScore(item: $0, logs: grouped[$0.itemId] ?? []) > calculateTrendingScore(item: $1, logs: grouped[$1.itemId] ?? []) }
+            .sorted { calculateTrendingScore(item: $0, logs: artistLogs[$0.itemId]?.logs ?? []) >
+                      calculateTrendingScore(item: $1, logs: artistLogs[$1.itemId]?.logs ?? []) }
+            
+            items = await feedService.enrichArtistsWithArtwork(items)
+            
+            if !items.isEmpty {
+                let summaries = await ArtistRatingsService.shared.fetchRatings(for: items.map { $0.title })
+                items = items.map { item in
+                    if let summary = summaries[item.title], summary.count > 0 {
+                        let rounded = (summary.average * 10).rounded() / 10
+                        return item.withAverageRating(rounded, totalRatings: summary.count)
+                    }
+                    return item
+                }
+            }
+            
+            if shouldGuard && context != genreLoadToken { return }
             self.genreTrendingArtists = Array(items.prefix(10))
             self.allGenreTrendingArtists = items
         } catch {
-            print("Error loading genre trending artists: \(error)")
+            logError("Error loading genre trending artists: \(error)")
+            if shouldGuard && context != genreLoadToken { return }
+        }
+        if !shouldGuard || context == genreLoadToken {
+            isLoadingGenreArtists = false
         }
     }
 
     @MainActor
-    func loadGenreTrendingAlbumsAsync(for genre: String) async {
+    func loadGenreTrendingAlbumsAsync(for genre: String, context: Int? = nil) async {
+        let shouldGuard = context != nil
+        if !shouldGuard {
         isLoadingGenreAlbums = true
-        defer { isLoadingGenreAlbums = false }
+        }
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            let snap = try await db.collection("logs")
-                .whereField("dateLogged", isGreaterThan: timeWindow)
-                .order(by: "dateLogged", descending: true)
-                .limit(to: 500)
-                .getDocuments()
-            var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            if let first = snap.documents.first, first.data().keys.contains("genres") {
-                let genreSnap = try await db.collection("logs")
-                    .whereField("genres", arrayContains: genre)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 500)
-                    .getDocuments()
-                logs = genreSnap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            } else {
-                logs = logs.filter { $0.dateLogged >= timeWindow }
-            }
+            let logsRaw = try await feedService.fetchGenreLogs(for: genre, limit: 500)
+            // Filter out hidden users
+            await UserPreferencesService.shared.loadHiddenUsers()
+            let hidden = UserPreferencesService.shared.hiddenUserIds
+            let logs = logsRaw.filter { !hidden.contains($0.userId) }
             let grouped = Dictionary(grouping: logs.filter { $0.itemType == "album" }) { $0.itemId }
-            let items: [TrendingItem] = grouped.compactMap { (itemId, logs) in
+            var items: [TrendingItem] = grouped.compactMap { (itemId, logs) in
                 guard let first = logs.first else { return nil }
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "album", itemId: itemId)
+                return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: nil, itemType: "album", itemId: itemId)
             }
             .sorted { calculateTrendingScore(item: $0, logs: grouped[$0.itemId] ?? []) > calculateTrendingScore(item: $1, logs: grouped[$1.itemId] ?? []) }
+            
+            // Enrich with overall ratings from all logs (not just genre window)
+            items = await feedService.enrichWithOverallRatings(items, itemType: "album")
+            
+            if shouldGuard && context != genreLoadToken { return }
             self.genreTrendingAlbums = Array(items.prefix(10))
             self.allGenreTrendingAlbums = items
         } catch {
-            print("Error loading genre trending albums: \(error)")
+            logError("Error loading genre trending albums: \(error)")
+            if shouldGuard && context != genreLoadToken { return }
+        }
+        if !shouldGuard || context == genreLoadToken {
+            isLoadingGenreAlbums = false
         }
     }
 
     // MARK: - Genre Popular with Friends
     @MainActor
-    func loadGenrePopularFriendsAsync(for genre: String) async {
+    func loadGenrePopularFriendsAsync(for genre: String, context: Int? = nil) async {
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
             let uid = Auth.auth().currentUser?.uid ?? ""
             guard !uid.isEmpty else { return }
-            let userDoc = try await db.collection("users").document(uid).getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Array(Set(followingIds).intersection(Set(followerIds)))
-            guard !mutuals.isEmpty else { self.genreFriendsPopularSongs = []; self.allGenreFriendsPopularSongs = []; return }
-            var all: [MusicLog] = []
-            for batch in mutuals.chunked(into: 10) {
-                let snap = try await db.collection("logs")
-                    .whereField("userId", in: batch)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                logs = logs.filter { $0.itemType == "song" && $0.dateLogged >= timeWindow && (($0.isPublic ?? true) == true) }
-                // Genre filter (either exact match set or simple contains if you store genres array)
-                logs = logs.filter { log in
-                    // If MusicLog has genres array, prefer that; otherwise do a naive match on title/artist (mock OK)
-                    if let mirror = Mirror(reflecting: log).children.first(where: { $0.label == "genres" })?.value as? [String] {
-                        return mirror.contains(genre)
-                    }
-                    return true
-                }
-                all.append(contentsOf: logs)
-            }
-            let grouped = Dictionary(grouping: all) { $0.itemId }
-            let items: [TrendingItem] = grouped.compactMap { (itemId, logs) in
-                guard let first = logs.first else { return nil }
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: first.title, subtitle: first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: "song", itemId: itemId)
-            }
-            .sorted {
-                let l = PopularityService.scoreFriendsPopular(logs: grouped[$0.itemId] ?? [])
-                let r = PopularityService.scoreFriendsPopular(logs: grouped[$1.itemId] ?? [])
-                return l > r
-            }
+            let items = try await feedService.fetchGenreFriendsPopularSongs(for: uid, genre: genre)
+            if context != nil && context != genreLoadToken { return }
             self.allGenreFriendsPopularSongs = items
             self.genreFriendsPopularSongs = Array(items.prefix(10))
         } catch {
-            print("Genre friends popular load error: \(error)")
+            logError("Genre friends popular load error: \(error)")
         }
     }
 
     // MARK: - Genre Popular with Friends (combined)
     @MainActor
-    func loadGenrePopularFriendsCombinedAsync(for genre: String) async {
+    func loadGenrePopularFriendsCombinedAsync(for genre: String, context: Int? = nil) async {
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
             let uid = Auth.auth().currentUser?.uid ?? ""
             guard !uid.isEmpty else { return }
-            let userDoc = try await db.collection("users").document(uid).getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Array(Set(followingIds).intersection(Set(followerIds)))
-            guard !mutuals.isEmpty else { self.genreFriendsPopularCombined = []; self.allGenreFriendsPopularCombined = []; return }
-            var all: [MusicLog] = []
-            for batch in mutuals.chunked(into: 10) {
-                let snap = try await db.collection("logs")
-                    .whereField("userId", in: batch)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 300)
-                    .getDocuments()
-                var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                logs = logs.filter { ["song","album","artist"].contains($0.itemType) && $0.dateLogged >= timeWindow && (($0.isPublic ?? true) == true) }
-                logs = logs.filter { log in
-                    if let mirror = Mirror(reflecting: log).children.first(where: { $0.label == "genres" })?.value as? [String] {
-                        return mirror.contains(genre)
-                    }
-                    return true
-                }
-                all.append(contentsOf: logs)
-            }
-            let grouped = Dictionary(grouping: all) { ($0.itemType + "|" + $0.itemId) }
-            let items: [TrendingItem] = grouped.compactMap { (_, logs) in
-                guard let first = logs.first else { return nil }
-                let ratings = logs.compactMap { $0.rating }
-                let avg = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-                return TrendingItem(title: first.title, subtitle: first.itemType == "artist" ? nil : first.artistName, artworkUrl: first.artworkUrl, logCount: logs.count, averageRating: avg, itemType: first.itemType, itemId: first.itemId)
-            }
-            .sorted { a, b in
-                let aKey = a.itemType + "|" + a.itemId
-                let bKey = b.itemType + "|" + b.itemId
-                let l = PopularityService.scoreFriendsPopular(logs: grouped[aKey] ?? [])
-                let r = PopularityService.scoreFriendsPopular(logs: grouped[bKey] ?? [])
-                return l > r
-            }
+            let items = try await feedService.fetchGenreFriendsPopularCombined(for: uid, genre: genre)
+            if context != nil && context != genreLoadToken { return }
             self.allGenreFriendsPopularCombined = items
             self.genreFriendsPopularCombined = Array(items.prefix(10))
         } catch {
@@ -787,20 +792,8 @@ class SocialFeedViewModel: ObservableObject {
     }
 
     private func scoreAndSortLogs(_ logs: [MusicLog]) -> [MusicLog] {
-        let cfg = ScoringConfig.shared
-        func score(_ log: MusicLog) -> Double {
-            let likes = Double(log.isLiked == true ? 1 : 0)
-            let helpful = Double(log.helpfulCount ?? 0)
-            let unhelpful = Double(log.unhelpfulCount ?? 0)
-            let comments = Double(log.commentCount ?? 0)
-            let rating = Double(log.rating ?? 0)
-            return helpful * cfg.helpfulWeight
-                + comments * cfg.commentsWeight
-                + likes * cfg.likesWeight
-                + rating * cfg.ratingWeight
-                - unhelpful * cfg.unhelpfulPenalty
-        }
-        return logs.sorted { score($0) > score($1) }
+        // Use new engagement scoring service
+        return EngagementScoringService.shared.sortByEngagement(logs)
     }
 
     // Popular helpers removed per redesign
@@ -816,30 +809,9 @@ class SocialFeedViewModel: ObservableObject {
                 return
             }
             // Fetch verified creators
-            let usersSnap = try await db.collection("users")
-                .whereField("isVerified", isEqualTo: true)
-                .limit(to: 20)
-                .getDocuments()
-            let users = usersSnap.documents.compactMap { try? $0.data(as: UserProfile.self) }
-            self.creatorsLastDoc = usersSnap.documents.last
-            var results: [CreatorSpotlight] = []
-            // Fetch recent logs per creator in parallel
-            try await withThrowingTaskGroup(of: (UserProfile, [MusicLog]).self) { group in
-                for user in users {
-                    group.addTask {
-                        let logSnap = try await self.db.collection("logs")
-                            .whereField("userId", isEqualTo: user.uid)
-                            .order(by: "dateLogged", descending: true)
-                            .limit(to: 3)
-                            .getDocuments()
-                        let recent = logSnap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                        return (user, recent)
-                    }
-                }
-                for try await (user, recent) in group {
-                    results.append(CreatorSpotlight(user: user, recentLogs: recent))
-                }
-            }
+            let page = try await feedService.fetchCreatorSpotlightEntries(limit: 20, after: nil)
+            self.creatorsLastDoc = page.lastDocument
+            var results = page.entries.map { CreatorSpotlight(user: $0.user, recentLogs: $0.recentLogs) }
             // Prefer creators that have a latest log
             results.sort { (a, b) in
                 let aDate = a.latestLog?.dateLogged ?? .distantPast
@@ -851,7 +823,7 @@ class SocialFeedViewModel: ObservableObject {
             self.isLoadingCreators = false
             self.creatorsLastLoadedAt = Date()
         } catch {
-            print("Error loading creators spotlight: \(error)")
+            logError("Error loading creators spotlight: \(error)")
             self.isLoadingCreators = false
         }
     }
@@ -861,31 +833,12 @@ class SocialFeedViewModel: ObservableObject {
         guard !isLoadingCreators else { return }
         isLoadingCreators = true
         do {
-            var query: Query = db.collection("users").whereField("isVerified", isEqualTo: true).order(by: "createdAt", descending: true)
-            if let last = creatorsLastDoc { query = query.start(afterDocument: last) }
-            let snap = try await query.limit(to: 20).getDocuments()
-            // Filter out hidden users
+            let page = try await feedService.fetchCreatorSpotlightEntries(limit: 20, after: creatorsLastDoc)
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
-            let users = snap.documents.compactMap { try? $0.data(as: UserProfile.self) }.filter { !hidden.contains($0.uid) }
-            self.creatorsLastDoc = snap.documents.last
-            var newResults: [CreatorSpotlight] = []
-            try await withThrowingTaskGroup(of: (UserProfile, [MusicLog]).self) { group in
-                for user in users {
-                    group.addTask {
-                        let logSnap = try await self.db.collection("logs")
-                            .whereField("userId", isEqualTo: user.uid)
-                            .order(by: "dateLogged", descending: true)
-                            .limit(to: 3)
-                            .getDocuments()
-                        let recent = logSnap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                        return (user, recent)
-                    }
-                }
-                for try await (user, recent) in group {
-                    newResults.append(CreatorSpotlight(user: user, recentLogs: recent))
-                }
-            }
+            let filteredEntries = page.entries.filter { !hidden.contains($0.user.uid) }
+            self.creatorsLastDoc = page.lastDocument
+            let newResults = filteredEntries.map { CreatorSpotlight(user: $0.user, recentLogs: $0.recentLogs) }
             // Append and keep sorted by latest activity
             self.allCreatorsSpotlight.append(contentsOf: newResults)
             self.allCreatorsSpotlight.sort { ($0.latestLog?.dateLogged ?? .distantPast) > ($1.latestLog?.dateLogged ?? .distantPast) }
@@ -900,13 +853,8 @@ class SocialFeedViewModel: ObservableObject {
     @MainActor
     func loadNowPlayingCreatorsAsync() async {
         do {
-            let usersSnap = try await db.collection("users")
-                .whereField("showNowPlaying", isEqualTo: true)
-                .limit(to: 40)
-                .getDocuments()
-            let users = usersSnap.documents.compactMap { try? $0.data(as: UserProfile.self) }
-            let filtered = users.filter { ($0.isVerified ?? false) || (($0.roles ?? []).contains("creator") || ($0.roles ?? []).contains("dj")) }
-            self.nowPlayingCreators = filtered
+            let users = try await feedService.fetchNowPlayingCreators(limit: 40)
+            self.nowPlayingCreators = users
         } catch {
             self.nowPlayingCreators = []
         }
@@ -950,18 +898,8 @@ class SocialFeedViewModel: ObservableObject {
         }
 
         setLoading(true)
-        var collected: [MusicLog] = []
         do {
-            for batch in includeIds.chunked(into: 10) {
-                var q: Query = db.collection("logs")
-                    .whereField("userId", in: batch)
-                    .order(by: "dateLogged", descending: true)
-                if type != "artist" { q = q.whereField("itemType", isEqualTo: type) }
-                let snap = try await q.limit(to: 120).getDocuments()
-                var logs = snap.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                if let cutoff = beforeDate { logs = logs.filter { $0.dateLogged < cutoff } }
-                collected.append(contentsOf: logs)
-            }
+            let collected = try await feedService.fetchCreatorLogs(for: includeIds, type: type, before: beforeDate)
             // De-duplicate, filter blocked users, and sort
             var map: [String: MusicLog] = [:]
             for l in collected { map[l.id] = l }
@@ -1031,30 +969,19 @@ class SocialFeedViewModel: ObservableObject {
     func startNewPostsListener() {
         Task { @MainActor in
             do {
-                // Initialize last seen with current top log
-                let snap = try await db.collection("logs")
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 1)
-                    .getDocuments()
-                let latest = snap.documents.first
-                if let latestDate = (try? latest?.data(as: MusicLog.self))??.dateLogged {
-                    self.lastSeenTopDate = latestDate
-                } else {
-                    self.lastSeenTopDate = Date()
-                }
+                let latest = try await feedService.fetchLatestLog()
+                self.lastSeenTopDate = latest?.dateLogged ?? Date()
             } catch {
                 self.lastSeenTopDate = Date()
             }
 
             // Attach listener to detect newer posts
             self.topLogListener?.remove()
-            self.topLogListener = db.collection("logs")
-                .order(by: "dateLogged", descending: true)
-                .limit(to: 1)
-                .addSnapshotListener { [weak self] snapshot, _ in
-                    guard let self = self else { return }
-                    guard let doc = snapshot?.documents.first,
-                          let latestLog = try? doc.data(as: MusicLog.self) else { return }
+            self.topLogListener = feedService.attachTopLogListener { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success(let latestLog):
+                    guard let latestLog = latestLog else { return }
                     if let lastSeen = self.lastSeenTopDate {
                         if latestLog.dateLogged > lastSeen {
                             DispatchQueue.main.async { self.hasNewPosts = true }
@@ -1062,7 +989,10 @@ class SocialFeedViewModel: ObservableObject {
                     } else {
                         self.lastSeenTopDate = latestLog.dateLogged
                     }
+                case .failure:
+                    break
                 }
+            }
         }
     }
 
@@ -1070,16 +1000,8 @@ class SocialFeedViewModel: ObservableObject {
         hasNewPosts = false
         Task { @MainActor in
             do {
-                let snap = try await db.collection("logs")
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 1)
-                    .getDocuments()
-                let latest = snap.documents.first
-                if let latestDate = (try? latest?.data(as: MusicLog.self))??.dateLogged {
-                    self.lastSeenTopDate = latestDate
-                } else {
-                    self.lastSeenTopDate = Date()
-                }
+                let latest = try await feedService.fetchLatestLog()
+                self.lastSeenTopDate = latest?.dateLogged ?? Date()
             } catch {
                 self.lastSeenTopDate = Date()
             }
@@ -1108,61 +1030,15 @@ class SocialFeedViewModel: ObservableObject {
     @MainActor
     private func loadTrendingSongsAsync() async {
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            let logs: [MusicLog]
-            do {
-                let ordered = try await db.collection("logs")
-                    .whereField("itemType", isEqualTo: "song")
-                    .whereField("dateLogged", isGreaterThan: timeWindow)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                logs = ordered.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            } catch {
-                let fallback = try await db.collection("logs")
-                    .whereField("itemType", isEqualTo: "song")
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                logs = fallback.documents.compactMap { try? $0.data(as: MusicLog.self) }.filter { $0.dateLogged >= timeWindow }
-            }
-            let trendingItems = calculateTrendingSongs(from: logs.filter { ($0.isPublic ?? true) })
-            
-            // Use fallback data if we don't have enough trending items
-            let finalTrendingItems = trendingItems.isEmpty ? generateFallbackTrendingData(type: .song) : trendingItems
-            
-            self.trendingSongs = Array(finalTrendingItems.prefix(10))
-            self.allTrendingSongs = finalTrendingItems
+            var items = try await feedService.fetchTrendingSongs()
+            if items.isEmpty { items = generateFallbackTrendingData(type: .song) }
+            self.trendingSongs = Array(items.prefix(10))
+            self.allTrendingSongs = items
             self.isLoadingTrendingSongs = false
         } catch {
-            print("Error loading trending songs: \(error)")
+            logError("Error loading trending songs: \(error)")
             self.isLoadingTrendingSongs = false
         }
-    }
-    
-    private func calculateTrendingSongs(from logs: [MusicLog]) -> [TrendingItem] {
-        let grouped = Dictionary(grouping: logs) { $0.itemId }
-        
-        return grouped.compactMap { (itemId, logs) in
-            guard let firstLog = logs.first else { return nil }
-            
-            let logCount = logs.count
-            let ratingsSum = logs.compactMap { $0.rating }.reduce(0, +)
-            let ratingsCount = logs.compactMap { $0.rating }.count
-            let averageRating = ratingsCount > 0 ? Double(ratingsSum) / Double(ratingsCount) : nil
-            
-            return TrendingItem(
-                title: firstLog.title,
-                subtitle: firstLog.artistName,
-                artworkUrl: firstLog.artworkUrl,
-                logCount: logCount,
-                averageRating: averageRating,
-                itemType: "song",
-                itemId: itemId
-            )
-        }
-        .filter { meetsTrendingThreshold(item: $0) }
-        .sorted { calculateTrendingScore(item: $0, logs: grouped[$0.itemId] ?? []) > calculateTrendingScore(item: $1, logs: grouped[$1.itemId] ?? []) }
     }
     
     // MARK: - Trending Artists
@@ -1178,61 +1054,29 @@ class SocialFeedViewModel: ObservableObject {
     @MainActor
     private func loadTrendingArtistsAsync() async {
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            let logs: [MusicLog]
-            do {
-                let ordered = try await db.collection("logs")
-                    .whereField("dateLogged", isGreaterThan: timeWindow)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 400)
-                    .getDocuments()
-                logs = ordered.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            } catch {
-                let fallback = try await db.collection("logs")
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 400)
-                    .getDocuments()
-                logs = fallback.documents.compactMap { try? $0.data(as: MusicLog.self) }.filter { $0.dateLogged >= timeWindow }
+            var items = try await feedService.fetchTrendingArtists()
+            if !items.isEmpty {
+                let artistNames = items.map { $0.title }
+                let summaries = await ArtistRatingsService.shared.fetchRatings(for: artistNames)
+                items = items.map { item in
+                    if let summary = summaries[item.title], summary.count > 0 {
+                        let rounded = (summary.average * 10).rounded() / 10
+                        return item.withAverageRating(rounded, totalRatings: summary.count)
+                    } else {
+                        return item
+                    }
+                }
             }
-            let trendingItems = calculateTrendingArtists(from: logs.filter { ($0.isPublic ?? true) })
-            
-            // Use fallback data if we don't have enough trending items
-            let finalTrendingItems = trendingItems.isEmpty ? generateFallbackTrendingData(type: .artist) : trendingItems
-            
-            self.trendingArtists = Array(finalTrendingItems.prefix(10))
-            self.allTrendingArtists = finalTrendingItems
+            if items.isEmpty { items = generateFallbackTrendingData(type: .artist) }
+            self.trendingArtists = Array(items.prefix(10))
+            self.allTrendingArtists = items
             self.isLoadingTrendingArtists = false
         } catch {
-            print("Error loading trending artists: \(error)")
+            logError("Error loading trending artists: \(error)")
             self.isLoadingTrendingArtists = false
         }
     }
     
-    private func calculateTrendingArtists(from logs: [MusicLog]) -> [TrendingItem] {
-        let grouped = Dictionary(grouping: logs) { $0.artistName }
-        
-        return grouped.compactMap { (artistName, logs) in
-            let logCount = logs.count
-            let ratingsSum = logs.compactMap { $0.rating }.reduce(0, +)
-            let ratingsCount = logs.compactMap { $0.rating }.count
-            let averageRating = ratingsCount > 0 ? Double(ratingsSum) / Double(ratingsCount) : nil
-            
-            // Use first log's artwork as artist artwork (could be improved)
-            let artworkUrl = logs.first?.artworkUrl
-            
-            return TrendingItem(
-                title: artistName,
-                subtitle: nil,
-                artworkUrl: artworkUrl,
-                logCount: logCount,
-                averageRating: averageRating,
-                itemType: "artist",
-                itemId: artistName
-            )
-        }
-        .filter { meetsTrendingThreshold(item: $0) }
-        .sorted { calculateTrendingScore(item: $0, logs: grouped[$0.title] ?? []) > calculateTrendingScore(item: $1, logs: grouped[$1.title] ?? []) }
-    }
     
     // MARK: - Trending Albums
     
@@ -1247,57 +1091,43 @@ class SocialFeedViewModel: ObservableObject {
     @MainActor
     private func loadTrendingAlbumsAsync() async {
         do {
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            let logs: [MusicLog]
-            do {
-                let ordered = try await db.collection("logs")
-                    .whereField("itemType", isEqualTo: "album")
-                    .whereField("dateLogged", isGreaterThan: timeWindow)
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                logs = ordered.documents.compactMap { try? $0.data(as: MusicLog.self) }
-            } catch {
-                let fallback = try await db.collection("logs")
-                    .whereField("itemType", isEqualTo: "album")
-                    .order(by: "dateLogged", descending: true)
-                    .limit(to: 200)
-                    .getDocuments()
-                logs = fallback.documents.compactMap { try? $0.data(as: MusicLog.self) }.filter { $0.dateLogged >= timeWindow }
-            }
-            let trendingItems = calculateTrendingAlbums(from: logs.filter { ($0.isPublic ?? true) })
-            
-            // Use fallback data if we don't have enough trending items
-            let finalTrendingItems = trendingItems.isEmpty ? generateFallbackTrendingData(type: .album) : trendingItems
-            
-            self.trendingAlbums = Array(finalTrendingItems.prefix(10))
-            self.allTrendingAlbums = finalTrendingItems
+            var items = try await feedService.fetchTrendingAlbums()
+            if items.isEmpty { items = generateFallbackTrendingData(type: .album) }
+            self.trendingAlbums = Array(items.prefix(10))
+            self.allTrendingAlbums = items
             self.isLoadingTrendingAlbums = false
         } catch {
-            print("Error loading trending albums: \(error)")
+            logError("Error loading trending albums: \(error)")
             self.isLoadingTrendingAlbums = false
         }
     }
     
     private func calculateTrendingAlbums(from logs: [MusicLog]) -> [TrendingItem] {
-        let grouped = Dictionary(grouping: logs) { $0.itemId }
+        // 🎯 Phase 3: Group by universalTrackId for cross-platform aggregation
+        let grouped = Dictionary(grouping: logs) { log in
+            log.universalTrackId ?? log.itemId // Fallback to itemId for old logs
+        }
         
-        return grouped.compactMap { (itemId, logs) in
+        return grouped.compactMap { (trackId, logs) in
             guard let firstLog = logs.first else { return nil }
             
             let logCount = logs.count
-            let ratingsSum = logs.compactMap { $0.rating }.reduce(0, +)
-            let ratingsCount = logs.compactMap { $0.rating }.count
-            let averageRating = ratingsCount > 0 ? Double(ratingsSum) / Double(ratingsCount) : nil
+            
+            // Find the original Apple Music ID from logs (prefer Apple Music platform)
+            let appleMusicLog = logs.first { $0.musicPlatform?.lowercased().contains("apple") == true }
+            let appleMusicId = appleMusicLog?.itemId ?? firstLog.itemId
+            
+            logDebug("💿 Trending Album: \(firstLog.title) - \(logCount) logs (universalId: \(trackId), appleMusicId: \(appleMusicId))")
             
             return TrendingItem(
                 title: firstLog.title,
                 subtitle: firstLog.artistName,
                 artworkUrl: firstLog.artworkUrl,
                 logCount: logCount,
-                averageRating: averageRating,
+                averageRating: nil, // Will be set by enrichWithOverallRatings
                 itemType: "album",
-                itemId: itemId
+                itemId: trackId,
+                appleMusicId: appleMusicId
             )
         }
         .filter { meetsTrendingThreshold(item: $0) }
@@ -1355,85 +1185,7 @@ class SocialFeedViewModel: ObservableObject {
                 return
             }
             
-            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
-            let userData = try userDoc.data(as: UserProfile.self)
-            
-            guard let following = userData.following, !following.isEmpty else {
-                self.friendsActivity = []
-                self.allFriendsActivity = []
-                self.isLoadingFriendsActivity = false
-                return
-            }
-            
-            let timeWindow = getAdaptiveTrendingTimeWindow()
-            
-            // Get recent logs from friends (batch by 10 due to Firestore 'in' query limit)
-            let batches = following.chunked(into: 10)
-            var allLogs: [MusicLog] = []
-            
-            for batch in batches {
-                do {
-                    let snapshot = try await db.collection("logs")
-                        .whereField("userId", in: batch)
-                        .whereField("dateLogged", isGreaterThan: timeWindow)
-                        .order(by: "dateLogged", descending: true)
-                        .limit(to: 100)
-                        .getDocuments()
-                    let logs = snapshot.documents.compactMap { try? $0.data(as: MusicLog.self) }
-                    allLogs.append(contentsOf: logs)
-                } catch {
-                    // Fallback without date filter to avoid composite index requirement
-                    let snapshot = try await db.collection("logs")
-                        .whereField("userId", in: batch)
-                        .order(by: "dateLogged", descending: true)
-                        .limit(to: 100)
-                        .getDocuments()
-                    let logs = snapshot.documents.compactMap { try? $0.data(as: MusicLog.self) }.filter { $0.dateLogged >= timeWindow }
-                    allLogs.append(contentsOf: logs)
-                }
-            }
-            
-            // Get user profiles for the friends
-            let userProfiles = try await fetchUserProfiles(for: following)
-            let profilesDict = Dictionary(uniqueKeysWithValues: userProfiles.map { ($0.uid, $0) })
-            
-            // Convert logs to friend activities
-            let activities = allLogs.compactMap { log -> FriendActivity? in
-                guard let userProfile = profilesDict[log.userId] else { return nil }
-                
-                return FriendActivity(
-                    userId: log.userId,
-                    username: userProfile.username,
-                    userProfilePictureUrl: userProfile.profilePictureUrl,
-                    songTitle: log.title,
-                    artistName: log.artistName,
-                    artworkUrl: log.artworkUrl,
-                    rating: log.rating,
-                    loggedAt: log.dateLogged,
-                    musicLog: log
-                )
-            }
-            .sorted { activity1, activity2 in
-                // Prioritize activities with ratings over those without
-                let rating1 = activity1.rating ?? 0
-                let rating2 = activity2.rating ?? 0
-                
-                // If both have ratings, prioritize higher ratings
-                if rating1 > 0 && rating2 > 0 {
-                    if rating1 != rating2 {
-                        return rating1 > rating2
-                    }
-                }
-                // If only one has a rating, prioritize the one with rating
-                else if rating1 > 0 && rating2 == 0 {
-                    return true
-                } else if rating1 == 0 && rating2 > 0 {
-                    return false
-                }
-                
-                // If ratings are equal (or both don't have ratings), sort by recency
-                return activity1.loggedAt > activity2.loggedAt
-            }
+            let activities = try await feedService.fetchFriendsActivity(for: currentUserId)
             
             // Filter out hidden users
             await UserPreferencesService.shared.loadHiddenUsers()
@@ -1441,15 +1193,11 @@ class SocialFeedViewModel: ObservableObject {
             let filtered = activities.filter { !hidden.contains($0.userId) }
             // Session de-duplication against other sections
             SocialSession.shared.register(logIds: filtered.compactMap { $0.musicLog?.id })
-            self.allFriendsActivity = filtered.filter { act in
-                guard let id = act.musicLog?.id else { return true }
-                // If already seen in this session from earlier render, skip
-                return true // keep all for All tab list; de-dupe at render time below
-            }
+            self.allFriendsActivity = filtered
             self.friendsActivity = Array(self.allFriendsActivity.prefix(5))
             self.isLoadingFriendsActivity = false
         } catch {
-            print("Error loading friends activity: \(error)")
+            logError("Error loading friends activity: \(error)")
             self.isLoadingFriendsActivity = false
         }
     }
@@ -1496,22 +1244,6 @@ class SocialFeedViewModel: ObservableObject {
                 trendingDisplayCountAlbums = min(trendingDisplayCountAlbums + step, allTrendingAlbums.count)
             }
         }
-    }
-    
-    private func fetchUserProfiles(for userIds: [String]) async throws -> [UserProfile] {
-        let batches = userIds.chunked(into: 10)
-        var profiles: [UserProfile] = []
-        
-        for batch in batches {
-            let snapshot = try await db.collection("users")
-                .whereField("uid", in: batch)
-                .getDocuments()
-            
-            let batchProfiles = snapshot.documents.compactMap { try? $0.data(as: UserProfile.self) }
-            profiles.append(contentsOf: batchProfiles)
-        }
-        
-        return profiles
     }
     
     // MARK: - Trending Score Calculation
@@ -1567,17 +1299,14 @@ class SocialFeedViewModel: ObservableObject {
     // MARK: - Fallback Data
     
     /// Gets an adaptive time window for trending calculations
-    /// Starts with 24 hours, but can expand if there's insufficient data
+    /// Uses 72 hours (3 days) for trending songs, albums, and artists
     private func getAdaptiveTrendingTimeWindow() -> Date {
         let now = Date()
         
-        // Start with 24 hours ago
-        let oneDayAgo = calendar.date(byAdding: .day, value: -1, to: now) ?? now
+        // Use 72 hours (3 days) ago for trending calculations
+        let threeDaysAgo = calendar.date(byAdding: .day, value: -3, to: now) ?? now
         
-        // TODO: Could be enhanced to check activity levels and expand to 48 hours or 1 week
-        // if there's insufficient data in the last 24 hours
-        
-        return oneDayAgo
+        return threeDaysAgo
     }
     
     /// Generates fallback trending data when there's insufficient real activity
@@ -1593,22 +1322,45 @@ class SocialFeedViewModel: ObservableObject {
         // Combine all friends popular items plus trending rails so PFPs appear everywhere
         let allItems = friendsPopularSongs + friendsPopularAlbums + friendsPopularCombined + trendingSongs + trendingAlbums + trendingArtists + genreTrending + genreTrendingAlbums + genreTrendingArtists
         
-        print("🔍 Loading friend data for \(allItems.count) items")
+        logDebug("🔍 Loading friend data for \(allItems.count) items")
+        logDebug("🔍 Sample items (first 3):")
+        for (index, item) in allItems.prefix(3).enumerated() {
+            logDebug("   \(index + 1). title: \(item.title), itemId: \(item.itemId), itemType: \(item.itemType)")
+        }
         
-        // Create items array for the service
-        let items = allItems.map { (id: $0.id, type: $0.itemType) }
+        // Create items array for the service - USE itemId (Apple Music ID), not id (generated ID)
+        let items = allItems.map { (id: $0.itemId, type: $0.itemType) }
         
         // Fetch friend data for all items
         friendsPopularService.fetchFriendsForItems(items: items) { [weak self] results in
             DispatchQueue.main.async {
-                self?.friendsData = results ?? [:]
-                print("✅ Loaded friend data for \(self?.friendsData.count ?? 0) items")
-                
-                // Add some mock data for testing if no real data
-                if self?.friendsData.isEmpty == true {
-                    print("📝 Adding mock friend data for testing")
-                    self?.addMockFriendData(for: allItems)
+                guard let self = self else { return }
+                // Store using itemId so we can look up by itemId later
+                self.friendsData = results ?? [:]
+                let totalItems = self.friendsData.count
+                self.logDebug("✅ Loaded friend data for \(totalItems) items")
+                self.logDebug("🔍 Friend data keys (first 5): \(Array(self.friendsData.keys).prefix(5))")
+                self.logDebug("🔍 Friend data details:")
+                for (key, friends) in self.friendsData.prefix(3) {
+                    let friendNames = friends.map { $0.displayName }.joined(separator: ", ")
+                    self.logDebug("   itemId: \(key) -> \(friends.count) friends: \(friendNames)")
+                    if friends.isEmpty {
+                        self.logDebug("      ⚠️ EMPTY ARRAY - no friends will be shown for this item")
+                    }
                 }
+                
+                #if DEBUG
+                // Add some mock data for testing if no real data
+                if self.friendsData.isEmpty {
+                    self.logDebug("📝 No real friend data found, adding mock data for testing (DEBUG only)")
+                    self.addMockFriendData(for: allItems)
+                }
+                #else
+                // In production, just log that no friend data was found
+                if self.friendsData.isEmpty {
+                    self.logDebug("ℹ️ No friend data found for any items (no friends have logged these items)")
+                }
+                #endif
             }
         }
     }
@@ -1622,21 +1374,26 @@ class SocialFeedViewModel: ObservableObject {
         ]
         
         for item in items {
-            friendsData[item.id] = mockFriends
+            friendsData[item.itemId] = mockFriends // Use itemId, not id
         }
     }
     
     func loadFriendsDataForItem(_ item: TrendingItem) {
-        friendsPopularService.fetchFriendsForItem(itemId: item.id, itemType: item.itemType) { [weak self] friends in
+        friendsPopularService.fetchFriendsForItem(itemId: item.itemId, itemType: item.itemType) { [weak self] friends in
             DispatchQueue.main.async {
                 if let friends = friends {
-                    self?.friendsData[item.id] = friends
+                    self?.friendsData[item.itemId] = friends // Store by itemId
                 }
             }
         }
     }
     
-    // startNewPostsListener method already exists elsewhere in the file
 }
 
- 
+// MARK: - Array Extension for Unique Elements
+extension Array where Element: Hashable {
+    func unique() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+}

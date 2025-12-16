@@ -125,6 +125,18 @@ class DailyPromptService: ObservableObject {
     
     private func handleNewActivePrompt(_ prompt: DailyPrompt) async {
         let previousPromptId = currentPrompt?.id
+        
+        // Check if the prompt has expired
+        if prompt.expiresAt < Date() {
+            print("⚠️ [DailyPrompt] Received expired prompt - ignoring: \(prompt.id)")
+            // Don't try to deactivate (requires admin permissions)
+            // Just ignore expired prompts - admin/cloud function will clean them up
+            currentPrompt = nil
+            userResponse = nil
+            promptLeaderboard = nil
+            return
+        }
+        
         currentPrompt = prompt
         
         // If this is a new prompt, load associated data
@@ -226,12 +238,9 @@ class DailyPromptService: ObservableObject {
             let responseRef = db.collection("promptResponses").document(response.id)
             try batch.setData(from: response, forDocument: responseRef)
             
-            // Update prompt response count
-            let promptRef = db.collection("dailyPrompts").document(promptId)
-            batch.updateData([
-                "totalResponses": FieldValue.increment(Int64(1)),
-                "featuredSongs": FieldValue.arrayUnion([songId])
-            ], forDocument: promptRef)
+            // NOTE: Removed prompt response count update to dailyPrompts collection
+            // Users don't have write permission to dailyPrompts (admin-only)
+            // Response counts can be calculated on-demand by querying promptResponses
             
             // Update user stats
             if let stats = userPromptStats {

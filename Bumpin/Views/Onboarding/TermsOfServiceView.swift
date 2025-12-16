@@ -57,7 +57,7 @@ struct TermsOfServiceView: View {
                             
                             // Web View for Terms
                             TermsWebView(hasScrolledToBottom: $hasScrolledToBottom)
-                                .frame(minHeight: 400)
+                            .frame(minHeight: 400)
                             
                             // Bottom marker for scroll detection
                             Color.clear
@@ -104,7 +104,6 @@ struct TermsOfServiceView: View {
                         }
                     }
                     .toggleStyle(SwitchToggleStyle(tint: .purple))
-                    .disabled(!hasScrolledToBottom)
                     
                     // Accept Button
                     Button(action: {
@@ -129,7 +128,7 @@ struct TermsOfServiceView: View {
                         )
                         .cornerRadius(25)
                     }
-                    .disabled(!hasAccepted || !hasScrolledToBottom)
+                    .disabled(!hasAccepted)
                     .scaleEffect(hasAccepted ? 1.0 : 0.95)
                     .animation(.easeInOut(duration: 0.2), value: hasAccepted)
                 }

@@ -29,14 +29,19 @@ struct LikeButton: View {
                     Image(systemName: isLiked ? "heart.fill" : "heart")
                         .foregroundColor(isLiked ? .red : .gray)
                         .font(.system(size: 16))
+                        .symbolEffect(.bounce, value: isLiked)
                     
                     if showCount && likeCount > 0 {
                         Text("\(likeCount)")
                             .font(.caption)
                             .foregroundColor(.gray)
+                            .contentTransition(.numericText())
                     }
                 }
             }
+            .scaleEffect(isLiked ? 1.1 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isLiked)
+            .animation(.smooth, value: likeCount)
             .disabled(isLoading)
             .opacity(isLoading ? 0.6 : 1.0)
         }
@@ -71,6 +76,13 @@ struct LikeButton: View {
     
     private func toggleLike() {
         guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        // Haptic feedback
+        if isLiked {
+            LogEngagementHaptics.unlike()
+        } else {
+            LogEngagementHaptics.like()
+        }
         
         isLoading = true
         

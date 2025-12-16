@@ -10,14 +10,18 @@
 			<key>CFBundleURLName</key>
 			<string>FirebaseReverseClientId</string>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Spotify OAuth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bumpin</string>
+			</array>
+		</dict>
 	</array>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>NSUserActivityTypeBrowsingWeb</string>
-	</array>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
@@ -37,5 +41,10 @@
 	<string>Bumpin can access your contacts to help you find and connect with friends who also use the app.</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>music</string>
+		<string>spotify</string>
+	</array>
 </dict>
 </plist>

@@ -9,6 +9,8 @@ class ReportingService: ObservableObject {
     static let shared = ReportingService()
     
     private let db = Firestore.firestore()
+    private let defaultMuteDuration: TimeInterval = 24 * 60 * 60 // 24 hours
+    private let defaultSuspensionDuration: TimeInterval = 72 * 60 * 60 // 72 hours
     
     // MARK: - Report Content
     
@@ -205,13 +207,26 @@ class ReportingService: ObservableObject {
     
     func resolveReport(reportId: String, action: ReportAction, adminNotes: String? = nil) async -> Bool {
         do {
-            try await db.collection("contentReports").document(reportId).updateData([
+            let docRef = db.collection("contentReports").document(reportId)
+            let snapshot = try await docRef.getDocument()
+            guard snapshot.exists, let report = try? snapshot.data(as: ContentReport.self) else {
+                print("❌ Report not found for id: \(reportId)")
+                return false
+            }
+            
+            try await enforceContentReportAction(report: report, action: action, adminNotes: adminNotes)
+            
+            var update: [String: Any] = [
                 "status": ReportStatus.resolved.rawValue,
                 "action": action.rawValue,
                 "adminNotes": adminNotes ?? "",
                 "resolvedAt": FieldValue.serverTimestamp()
-            ])
+            ]
+            if let adminId = Auth.auth().currentUser?.uid {
+                update["resolvedBy"] = adminId
+            }
             
+            try await docRef.updateData(update)
             print("✅ Report resolved with action: \(action.rawValue)")
             return true
         } catch {
@@ -222,18 +237,174 @@ class ReportingService: ObservableObject {
     
     func resolveUserReport(reportId: String, action: UserReportAction, adminNotes: String? = nil) async -> Bool {
         do {
-            try await db.collection("userReports").document(reportId).updateData([
+            let docRef = db.collection("userReports").document(reportId)
+            let snapshot = try await docRef.getDocument()
+            guard snapshot.exists, let report = try? snapshot.data(as: UserReport.self) else {
+                print("❌ User report not found for id: \(reportId)")
+                return false
+            }
+            
+            try await enforceUserReportAction(report: report, action: action, adminNotes: adminNotes)
+            
+            var update: [String: Any] = [
                 "status": ReportStatus.resolved.rawValue,
                 "action": action.rawValue,
                 "adminNotes": adminNotes ?? "",
                 "resolvedAt": FieldValue.serverTimestamp()
-            ])
+            ]
+            if let adminId = Auth.auth().currentUser?.uid {
+                update["resolvedBy"] = adminId
+            }
             
+            try await docRef.updateData(update)
             print("✅ User report resolved with action: \(action.rawValue)")
             return true
         } catch {
             print("❌ Failed to resolve user report: \(error)")
             return false
+        }
+    }
+    
+    // MARK: - Enforcement Helpers
+    
+    private func enforceContentReportAction(report: ContentReport, action: ReportAction, adminNotes: String?) async throws {
+        guard action != .noAction else { return }
+        
+        switch action {
+        case .contentRemoved:
+            try await deleteReportedContent(for: report)
+        case .userWarned:
+            try await warnUser(userId: report.reportedUserId, reason: report.reason.displayName)
+        case .userMuted:
+            try await muteUser(userId: report.reportedUserId, reason: report.reason.displayName)
+        case .userBanned:
+            try await banUser(userId: report.reportedUserId, reason: "Content violation: \(report.reason.displayName)")
+        case .noAction:
+            break
+        }
+        
+        await logModerationAction(
+            reportId: report.id,
+            reportType: "content",
+            targetUserId: report.reportedUserId,
+            action: action.rawValue,
+            adminNotes: adminNotes
+        )
+    }
+    
+    private func enforceUserReportAction(report: UserReport, action: UserReportAction, adminNotes: String?) async throws {
+        guard action != .noAction else { return }
+        
+        switch action {
+        case .userWarned:
+            try await warnUser(userId: report.reportedUserId, reason: report.reason.displayName)
+        case .userMuted:
+            try await muteUser(userId: report.reportedUserId, reason: report.reason.displayName)
+        case .accountSuspended:
+            try await suspendUser(userId: report.reportedUserId, reason: report.reason.displayName)
+        case .userBanned:
+            try await banUser(userId: report.reportedUserId, reason: "User violation: \(report.reason.displayName)")
+        case .noAction:
+            break
+        }
+        
+        await logModerationAction(
+            reportId: report.id,
+            reportType: "user",
+            targetUserId: report.reportedUserId,
+            action: action.rawValue,
+            adminNotes: adminNotes
+        )
+    }
+    
+    private func deleteReportedContent(for report: ContentReport) async throws {
+        let collectionName = report.contentType.firestoreCollection
+        let docRef = db.collection(collectionName).document(report.contentId)
+        do {
+            try await docRef.delete()
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == FirestoreErrorDomain,
+               nsError.code == FirestoreErrorCode.notFound.rawValue {
+                print("⚠️ Reported content already removed: \(report.contentId)")
+            } else {
+                throw error
+            }
+        }
+    }
+    
+    private func warnUser(userId: String, reason: String?) async throws {
+        let userRef = db.collection("users").document(userId)
+        var update: [String: Any] = [
+            "warningCount": FieldValue.increment(Int64(1)),
+            "lastWarningAt": FieldValue.serverTimestamp()
+        ]
+        if let reason = reason {
+            update["lastWarningReason"] = reason
+        }
+        try await userRef.updateData(update)
+    }
+    
+    private func muteUser(userId: String, reason: String?) async throws {
+        let userRef = db.collection("users").document(userId)
+        var update: [String: Any] = [
+            "isMuted": true,
+            "mutedUntil": Timestamp(date: Date().addingTimeInterval(defaultMuteDuration))
+        ]
+        if let reason = reason {
+            update["muteReason"] = reason
+        }
+        try await userRef.updateData(update)
+    }
+    
+    private func suspendUser(userId: String, reason: String?) async throws {
+        let userRef = db.collection("users").document(userId)
+        var update: [String: Any] = [
+            "isSuspended": true,
+            "suspensionExpiresAt": Timestamp(date: Date().addingTimeInterval(defaultSuspensionDuration))
+        ]
+        if let reason = reason {
+            update["suspensionReason"] = reason
+        }
+        try await userRef.updateData(update)
+    }
+    
+    private func banUser(userId: String, reason: String?) async throws {
+        let userRef = db.collection("users").document(userId)
+        var update: [String: Any] = [
+            "isBanned": true,
+            "banExpiresAt": NSNull()
+        ]
+        if let reason = reason {
+            update["banReason"] = reason
+        }
+        try await userRef.updateData(update)
+    }
+    
+    private func logModerationAction(
+        reportId: String,
+        reportType: String,
+        targetUserId: String,
+        action: String,
+        adminNotes: String?
+    ) async {
+        var payload: [String: Any] = [
+            "reportId": reportId,
+            "reportType": reportType,
+            "targetUserId": targetUserId,
+            "action": action,
+            "timestamp": FieldValue.serverTimestamp()
+        ]
+        if let adminId = Auth.auth().currentUser?.uid {
+            payload["adminUserId"] = adminId
+        }
+        if let adminNotes = adminNotes, !adminNotes.isEmpty {
+            payload["adminNotes"] = adminNotes
+        }
+        do {
+            try await db.collection("moderationActions").document(UUID().uuidString).setData(payload)
+        } catch {
+            print("⚠️ Failed to log moderation action: \(error)")
         }
     }
 }

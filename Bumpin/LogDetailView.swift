@@ -41,22 +41,72 @@ struct LogDetailView: View {
     }
     
     private var ratingSection: some View {
-        HStack(spacing: 4) {
-            if Auth.auth().currentUser?.uid == log.userId {
-                ForEach(1...5, id: \.self) { idx in
-                    Button(action: { updateRatingInline(idx) }) {
-                        Image(systemName: idx <= (log.rating ?? 0) ? "star.fill" : "star")
-                            .foregroundColor(.yellow)
+        HStack(spacing: 8) {
+            // Show numerical rating
+            if let rating = log.rating {
+                Text(String(format: "%.1f", rating))
+                    .font(.title3)
+                    .fontWeight(.medium)
+                    .foregroundColor(.primary)
+            }
+            
+            // Star display
+            HStack(spacing: 4) {
+                if Auth.auth().currentUser?.uid == log.userId {
+                    // Editable for owner (whole stars only for now)
+                    ForEach(1...5, id: \.self) { idx in
+                        Button(action: { updateRatingInline(Double(idx)) }) {
+                            Image(systemName: Double(idx) <= (log.rating ?? 0.0) ? "star.fill" : "star")
+                                .foregroundColor(.yellow)
+                        }
+                        .buttonStyle(PlainButtonStyle())
                     }
-                    .buttonStyle(PlainButtonStyle())
-                }
-            } else {
-                ForEach(1...5, id: \.self) { idx in
-                    Image(systemName: idx <= (log.rating ?? 0) ? "star.fill" : "star")
-                        .foregroundColor(.yellow)
+                } else if let rating = log.rating {
+                    // Display-only with partial stars
+                    ForEach(1...5, id: \.self) { idx in
+                        starView(for: idx, rating: rating)
+                    }
+                } else {
+                    // Empty stars for no rating
+                    ForEach(1...5, id: \.self) { idx in
+                        Image(systemName: "star")
+                            .foregroundColor(.gray.opacity(0.3))
+                    }
                 }
             }
-        }.font(.title3)
+            .font(.title3)
+        }
+    }
+    
+    @ViewBuilder
+    private func starView(for index: Int, rating: Double) -> some View {
+        let fillAmount = calculateFillAmount(for: index, rating: rating)
+        
+        ZStack(alignment: .leading) {
+            // Background (empty star)
+            Image(systemName: "star")
+                .foregroundColor(.gray.opacity(0.3))
+            
+            // Foreground (filled portion)
+            Image(systemName: "star.fill")
+                .foregroundColor(.yellow)
+                .mask(
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .frame(width: geometry.size.width * fillAmount)
+                    }
+                )
+        }
+    }
+    
+    private func calculateFillAmount(for index: Int, rating: Double) -> CGFloat {
+        if rating >= Double(index) {
+            return 1.0
+        } else if rating > Double(index - 1) {
+            return CGFloat(rating - Double(index - 1))
+        } else {
+            return 0.0
+        }
     }
     
     private var commentsSection: some View {
@@ -164,7 +214,7 @@ struct LogDetailView: View {
         }
     }
     
-    private func updateRatingInline(_ newValue: Int) {
+    private func updateRatingInline(_ newValue: Double) {
         guard Auth.auth().currentUser?.uid == log.userId else { return }
         var updated = log
         updated.rating = newValue
@@ -182,15 +232,7 @@ private struct CommentRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                if let urlStr = comment.userProfilePictureUrl, let url = URL(string: urlStr) {
-                    AsyncImage(url: url) { img in
-                        img.resizable().scaledToFill()
-                    } placeholder: { Color.gray.opacity(0.2) }
-                    .frame(width: 28, height: 28)
-                    .clipShape(Circle())
-                } else {
-                    Circle().fill(Color.gray.opacity(0.25)).frame(width: 28, height: 28)
-                }
+                UserAvatarView(userId: comment.userId, existingUrl: comment.userProfilePictureUrl, initials: comment.username, size: 28)
                 Text(comment.username)
                     .font(.subheadline).fontWeight(.semibold)
                 Spacer()
@@ -324,12 +366,22 @@ private struct CommentComposerView: View {
     
     private func send() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let user = Auth.auth().currentUser else { return }
+        guard !trimmed.isEmpty else { return }
         isSending = true
-        // Fetch optional profile image
-        Firestore.firestore().collection("users").document(user.uid).getDocument { snap, _ in
-            let url = snap?.data()? ["profilePictureUrl"] as? String
-            let comment = ReviewComment(logId: logId, userId: user.uid, username: user.displayName ?? "You", userProfilePictureUrl: url, text: trimmed)
+        Task {
+            guard let context = await ReviewComment.currentUserContext() else {
+                await MainActor.run { isSending = false }
+                return
+            }
+            
+            let comment = ReviewComment(
+                logId: logId,
+                userId: context.userId,
+                username: context.username,
+                userProfilePictureUrl: context.profilePictureUrl,
+                text: trimmed
+            )
+            
             ReviewComment.addComment(comment) { err in
                 DispatchQueue.main.async {
                     isSending = false

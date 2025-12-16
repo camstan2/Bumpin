@@ -16,19 +16,44 @@ struct FriendProfilePictures: View {
     var body: some View {
         HStack(spacing: -overlap) {
             ForEach(Array(friends.prefix(maxVisible).enumerated()), id: \.element.id) { index, friend in
-                AsyncImage(url: URL(string: friend.profileImageUrl ?? "")) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    Circle()
-                        .fill(Color.gray.opacity(0.3))
-                        .overlay(
-                            Text(friend.displayName.prefix(1).uppercased())
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundColor(.gray)
-                        )
+                Group {
+                    if let urlString = friend.profileImageUrl, let url = URL(string: urlString) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            case .failure(_), .empty:
+                                Circle()
+                                    .fill(Color.purple.opacity(0.2))
+                                    .overlay(
+                                        Text(friend.displayName.prefix(1).uppercased())
+                                            .font(.system(size: size * 0.4))
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.purple)
+                                    )
+                            @unknown default:
+                                Circle()
+                                    .fill(Color.purple.opacity(0.2))
+                                    .overlay(
+                                        Text(friend.displayName.prefix(1).uppercased())
+                                            .font(.system(size: size * 0.4))
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.purple)
+                                    )
+                            }
+                        }
+                    } else {
+                        Circle()
+                            .fill(Color.purple.opacity(0.2))
+                            .overlay(
+                                Text(friend.displayName.prefix(1).uppercased())
+                                    .font(.system(size: size * 0.4))
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.purple)
+                            )
+                    }
                 }
                 .frame(width: size, height: size)
                 .clipShape(Circle())

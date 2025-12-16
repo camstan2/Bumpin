@@ -15,12 +15,8 @@ struct FriendLogChip: View {
             }
             Text(username ?? "@???").font(.caption2).lineLimit(1)
             // stars
-            HStack(spacing: 1) {
-                ForEach(1...5, id: \.self) { idx in
-                    Image(systemName: idx <= (log.rating ?? 0) ? "star.fill" : "star")
-                        .font(.system(size: 8))
-                        .foregroundColor(.yellow)
-                }
+            if let rating = log.rating {
+                StarRatingDisplayView(rating: rating, starSize: 8, spacing: 1, showNumber: false)
             }
         }
         .frame(width: 60)

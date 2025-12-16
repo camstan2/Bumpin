@@ -9,6 +9,46 @@
         { "fieldPath": "popularity", "order": "DESCENDING" },
         { "fieldPath": "priority", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "universalTrackId", "order": "ASCENDING" },
+        { "fieldPath": "dateLogged", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "universalTrackId", "order": "ASCENDING" },
+        { "fieldPath": "dateLogged", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "universalTrackId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "musicPlatform", "order": "ASCENDING" },
+        { "fieldPath": "dateLogged", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "genres", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "dateLogged", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

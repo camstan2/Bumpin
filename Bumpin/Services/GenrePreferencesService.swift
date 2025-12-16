@@ -11,6 +11,7 @@ class GenrePreferencesService: ObservableObject {
     // MARK: - Published Properties
     
     @Published var favoriteGenres: Set<String> = []
+    @Published var orderedFavoriteGenres: [String] = [] // Ordered array for display
     @Published var isLoading = false
     @Published var showGenreSettings = false
     
@@ -40,12 +41,22 @@ class GenrePreferencesService: ObservableObject {
     func toggleGenre(_ genre: String) {
         if favoriteGenres.contains(genre) {
             favoriteGenres.remove(genre)
+            orderedFavoriteGenres.removeAll { $0 == genre }
         } else {
             favoriteGenres.insert(genre)
+            orderedFavoriteGenres.append(genre)
         }
         saveFavoriteGenres()
         
-        print("🎵 Genre preferences updated: \(favoriteGenres.sorted())")
+        print("🎵 Genre preferences updated: \(orderedFavoriteGenres)")
+    }
+    
+    /// Reorder favorite genres
+    func reorderGenres(from source: IndexSet, to destination: Int) {
+        orderedFavoriteGenres.move(fromOffsets: source, toOffset: destination)
+        saveFavoriteGenres()
+        
+        print("🔄 Genre order updated: \(orderedFavoriteGenres)")
     }
     
     /// Check if a genre is favorited
@@ -55,24 +66,27 @@ class GenrePreferencesService: ObservableObject {
     
     /// Get favorite genres as sorted array for display
     var favoriteGenresArray: [String] {
-        return Array(favoriteGenres).sorted()
+        return orderedFavoriteGenres
     }
     
     /// Reset to default genres
     func resetToDefaults() {
         favoriteGenres = defaultGenres
+        orderedFavoriteGenres = Array(defaultGenres).sorted()
         saveFavoriteGenres()
     }
     
     /// Select all genres
     func selectAllGenres() {
         favoriteGenres = Set(allGenres)
+        orderedFavoriteGenres = allGenres
         saveFavoriteGenres()
     }
     
     /// Clear all selections
     func clearAllGenres() {
         favoriteGenres = []
+        orderedFavoriteGenres = []
         saveFavoriteGenres()
     }
     
@@ -84,12 +98,14 @@ class GenrePreferencesService: ObservableObject {
         // Try to load from UserDefaults first (local cache)
         if let savedGenres = UserDefaults.standard.array(forKey: favoritesKey) as? [String] {
             favoriteGenres = Set(savedGenres)
-            print("📱 Loaded favorite genres from UserDefaults: \(favoriteGenres.sorted())")
+            orderedFavoriteGenres = savedGenres
+            print("📱 Loaded favorite genres from UserDefaults: \(orderedFavoriteGenres)")
         } else {
             // Set defaults for new users
             favoriteGenres = defaultGenres
+            orderedFavoriteGenres = Array(defaultGenres).sorted()
             saveFavoriteGenres()
-            print("🆕 New user - set default favorite genres: \(favoriteGenres.sorted())")
+            print("🆕 New user - set default favorite genres: \(orderedFavoriteGenres)")
         }
         
         isLoading = false
@@ -99,8 +115,8 @@ class GenrePreferencesService: ObservableObject {
     }
     
     private func saveFavoriteGenres() {
-        // Save to UserDefaults for immediate access
-        UserDefaults.standard.set(Array(favoriteGenres), forKey: favoritesKey)
+        // Save ordered array to UserDefaults for immediate access
+        UserDefaults.standard.set(orderedFavoriteGenres, forKey: favoritesKey)
         
         // Sync to Firestore for cross-device access
         syncWithFirestore()
@@ -110,10 +126,9 @@ class GenrePreferencesService: ObservableObject {
         guard let userId = Auth.auth().currentUser?.uid else { return }
         
         let db = Firestore.firestore()
-        let genresArray = Array(favoriteGenres)
         
         db.collection("users").document(userId).updateData([
-            "favoriteGenres": genresArray,
+            "favoriteGenres": orderedFavoriteGenres,
             "genrePreferencesUpdated": FieldValue.serverTimestamp()
         ]) { error in
             if let error = error {
@@ -140,10 +155,11 @@ class GenrePreferencesService: ObservableObject {
                     let firestoreSet = Set(firestoreGenres)
                     
                     // Only update if different from current
-                    if firestoreSet != favoriteGenres {
+                    if firestoreSet != favoriteGenres || firestoreGenres != orderedFavoriteGenres {
                         favoriteGenres = firestoreSet
-                        UserDefaults.standard.set(Array(favoriteGenres), forKey: favoritesKey)
-                        print("🔄 Synced favorite genres from Firestore: \(favoriteGenres.sorted())")
+                        orderedFavoriteGenres = firestoreGenres
+                        UserDefaults.standard.set(orderedFavoriteGenres, forKey: favoritesKey)
+                        print("🔄 Synced favorite genres from Firestore: \(orderedFavoriteGenres)")
                     }
                 }
             }

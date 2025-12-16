@@ -66,10 +66,10 @@ struct MusicComment: Identifiable, Codable {
     let userProfileImage: String?
     let comment: String
     let timestamp: Date
-    let likes: Int
-    let dislikes: Int
-    let userLiked: Bool?
-    let userDisliked: Bool?
+    var likes: Int
+    var dislikes: Int
+    var userLiked: Bool?
+    var userDisliked: Bool?
     var replies: [CommentReply] = []
     var isExpanded: Bool = false
     
@@ -92,9 +92,10 @@ struct MusicProfile: Codable {
     let itemType: String // "song", "album", "artist"
     let averageRating: Double
     let totalRatings: Int
+    let totalLogs: Int // Total number of logs (rated + unrated)
     let totalLikes: Int
     let totalDislikes: Int
-    let userRating: Int?
+    let userRating: Double? // Changed from Int? to Double? for half-star support
     let userLiked: Bool?
     let userDisliked: Bool?
 }
@@ -108,12 +109,13 @@ struct MusicProfileView: View {
     @State private var showLogForm = false
     @Environment(\.dismiss) private var dismiss
     @State private var profile: MusicProfile?
-    @State private var comments: [MusicComment] = []
+    @State private var communityLogs: [MusicLog] = [] // Changed from comments to logs
     @State private var lastCommentsDoc: DocumentSnapshot? = nil
     @State private var hasMoreComments: Bool = true
     @State private var isLoading: Bool = true
     @State private var errorMessage: String?
-    @State private var userRating: Int = 0
+    @State private var universalTrackId: String? // Store universal track ID for analytics
+    @State private var userRating: Double = 0.0 // Changed from Int to Double to support half stars
     @State private var showingReplySheet: Bool = false
     @State private var selectedCommentForReply: MusicComment?
     @State private var replyText: String = ""
@@ -136,14 +138,37 @@ struct MusicProfileView: View {
     @State var friendIds: [String] = []
     @State private var albumTracks: [MusicSearchResult] = []
     @State private var trackRatings: [String: Double] = [:]
+    @State private var trackRatingsLoadedIds: Set<String> = []
     @State private var isLoadingTracks: Bool = false
     
+    private var aggregatedRatingStats: (average: Double, total: Int) {
+        let logRatings = communityLogs.compactMap { $0.rating }
+        if !logRatings.isEmpty {
+            let total = logRatings.count
+            let sum = logRatings.reduce(0.0, +)
+            let average = sum / Double(total)
+            let clamped = max(0.0, min(5.0, average))
+            let rounded = (clamped * 10).rounded() / 10
+            return (rounded, total)
+        }
+        if let profile = profile, profile.totalRatings > 0 {
+            let clamped = max(0.0, min(5.0, profile.averageRating))
+            let rounded = (clamped * 10).rounded() / 10
+            return (rounded, profile.totalRatings)
+        }
+        return (0.0, 0)
+    }
+
     // Listen Later integration
     @State private var isAddingToListenLater = false
     @State private var listenLaterSuccess = false
     
     // Track navigation
     @State private var selectedTrack: MusicSearchResult?
+    @State private var showArtistProfile = false
+    @State private var showArtistPicker = false
+    @State private var artistPickerOptions: [String] = []
+    @State private var selectedArtistNameForProfile: String?
     
     // Cross-platform data
     @State private var universalProfile: UniversalMusicProfileService.UniversalMusicProfile?
@@ -152,7 +177,7 @@ struct MusicProfileView: View {
     var body: some View {
         Group {
             // Debug: Check if this is being used for an artist
-            let _ = print("🎯 MusicProfileView: Showing profile for \(musicItem.title) (type: \(musicItem.itemType))")
+            // Reduced logging - only log on initial load, not every re-render
             
             // Redirect artists to the enhanced ArtistProfileView
             if musicItem.itemType == "artist" {
@@ -176,7 +201,6 @@ struct MusicProfileView: View {
             }
         }
         .onAppear {
-            print("🎯 MusicProfileView appeared for: \(musicItem.title)")
             // Ensure we start loading immediately
             if profile == nil {
                 loadProfile()
@@ -184,6 +208,29 @@ struct MusicProfileView: View {
                 loadFriendIds()
             }
         }
+    }
+    
+    private func handleArtistSubtitleTap() {
+        let artists = parsedArtistNames()
+        if let first = artists.first, artists.count == 1 {
+            selectedArtistNameForProfile = first
+            showArtistProfile = true
+        } else if artists.count > 1 {
+            artistPickerOptions = artists
+            showArtistPicker = true
+        } else if !musicItem.artistName.isEmpty {
+            selectedArtistNameForProfile = musicItem.artistName
+            showArtistProfile = true
+        }
+    }
+    
+    private func parsedArtistNames() -> [String] {
+        let parsed = ArtistNameParser.splitArtists(from: musicItem.artistName)
+        if parsed.isEmpty {
+            let trimmed = musicItem.artistName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [trimmed]
+        }
+        return parsed
     }
     
     // MARK: - Music Profile Content (for non-artists)
@@ -197,10 +244,16 @@ struct MusicProfileView: View {
                         subtitle: musicItem.artistName,
                         itemType: musicItem.itemType,
                         artworkURL: musicItem.artworkURL,
-                        averageRating: universalProfile?.averageRating ?? profile?.averageRating ?? 0.0,
-                        totalRatings: universalProfile?.totalRatings ?? profile?.totalRatings ?? 0,
+                        averageRating: profile?.averageRating ?? 0.0,
+                        totalRatings: profile?.totalRatings ?? 0,
+                        totalLogs: profile?.totalLogs ?? 0,
                         onActionTapped: { addItemToListenLater() },
-                        crossPlatformInfo: universalProfile?.crossPlatformPopularity
+                        crossPlatformInfo: universalProfile?.crossPlatformPopularity,
+                        itemId: musicItem.id,
+                        platform: musicItem.platform,
+                        onSubtitleTapped: {
+                            handleArtistSubtitleTap()
+                        }
                     )
                     .profileSection()
 
@@ -223,26 +276,50 @@ struct MusicProfileView: View {
                     // Rating & Community Section
                     DisplayOnlyRatingView(
                         userRating: userRating,
-                        averageRating: profile?.averageRating ?? 0.0,
-                        totalRatings: profile?.totalRatings ?? 0
+                        averageRating: aggregatedRatingStats.average,
+                        totalRatings: aggregatedRatingStats.total
                     )
                     .profileSection()
                     
                     // Rating Distribution Section
-                    EnhancedRatingDistributionView(
+                    if let universalId = universalTrackId {
+                        EnhancedRatingDistributionView(
+                            itemId: musicItem.id,
+                            universalTrackId: universalId,
+                            itemType: musicItem.itemType,
+                            itemTitle: musicItem.title
+                        )
+                        .profileSection()
+                    } else {
+                        // Fallback to old behavior if universal track ID not available
+                        EnhancedRatingDistributionView(
+                            itemId: musicItem.id,
+                            universalTrackId: nil,
+                            itemType: musicItem.itemType,
+                            itemTitle: musicItem.title
+                        )
+                        .profileSection()
+                    }
+                    
+                // Analytics Section
+                if let universalId = universalTrackId {
+                    EnhancedPopularityGraphView(
                         itemId: musicItem.id,
+                        universalTrackId: universalId,
                         itemType: musicItem.itemType,
                         itemTitle: musicItem.title
                     )
                     .profileSection()
-                    
-                // Analytics Section
-                EnhancedPopularityGraphView(
-                    itemId: musicItem.id,
-                    itemType: musicItem.itemType,
-                    itemTitle: musicItem.title
-                )
-                .profileSection()
+                } else {
+                    // Fallback to old behavior if universal track ID not available
+                    EnhancedPopularityGraphView(
+                        itemId: musicItem.id,
+                        universalTrackId: nil,
+                        itemType: musicItem.itemType,
+                        itemTitle: musicItem.title
+                    )
+                    .profileSection()
+                }
                 
                 // Tracklist Section (only for albums) - moved up
                 if musicItem.itemType == "album" {
@@ -251,26 +328,10 @@ struct MusicProfileView: View {
                 
                 // Social Section
                 EnhancedSocialSection(
-                    comments: comments,
-                    userRatings: userRatingsCache,
-                    onLoadMoreComments: { loadMoreComments() },
-                    onAddComment: { showLogForm = true },
-                    onCommentLike: { comment in
-                        // Handle comment like
-                        print("Like comment from \(comment.username)")
-                    },
-                    onCommentRepost: { comment in
-                        // Handle comment repost
-                        print("Repost comment from \(comment.username)")
-                    },
-                    onCommentReply: { comment in
-                        // Handle comment reply
-                        selectedCommentForReply = comment
-                        showingReplySheet = true
-                    },
-                    onCommentThumbsDown: { comment in
-                        // Handle comment thumbs down
-                        print("Thumbs down comment from \(comment.username)")
+                    musicItem: musicItem,
+                    logs: communityLogs,
+                    onViewAllLogs: {
+                        // Navigation handled by View All button in EnhancedSocialSection
                     }
                 )
                 .profileSection()
@@ -279,7 +340,8 @@ struct MusicProfileView: View {
                 EnhancedFriendsLogsSection(
                     itemId: musicItem.id,
                     itemType: musicItem.itemType,
-                    itemTitle: musicItem.title
+                    itemTitle: musicItem.title,
+                    musicItem: musicItem
                 )
                 .profileSection()
                 
@@ -565,6 +627,21 @@ struct MusicProfileView: View {
         .refreshable {
             await refreshData()
         }
+        .fullScreenCover(isPresented: $showArtistProfile) {
+            ArtistProfileView(artistName: selectedArtistNameForProfile ?? musicItem.artistName)
+                .onDisappear {
+                    selectedArtistNameForProfile = nil
+                }
+        }
+        .confirmationDialog("Choose an artist", isPresented: $showArtistPicker, titleVisibility: .visible) {
+            ForEach(artistPickerOptions, id: \.self) { artist in
+                Button(artist) {
+                    selectedArtistNameForProfile = artist
+                    showArtistProfile = true
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        }
     }
     
     // MARK: - Enhanced Sections
@@ -572,8 +649,8 @@ struct MusicProfileView: View {
     private var enhancedFriendsActivitySection: some View {
         VStack(spacing: ProfileDesignSystem.Spacing.lg) {
             ProfileSectionHeader(
-                title: "Friends Activity",
-                subtitle: "See what your friends think",
+                title: "Follower Activity",
+                subtitle: "See what your followers think",
                 icon: "person.2.fill"
             )
             
@@ -626,6 +703,12 @@ struct MusicProfileView: View {
         .padding(ProfileDesignSystem.Spacing.cardPadding)
         .profileCard()
         .profileSection()
+        .task {
+            let ids = Set(albumTracks.map { $0.id })
+            if ids != trackRatingsLoadedIds {
+                await loadTrackRatings()
+            }
+        }
     }
     
     private func enhancedTrackRow(_ track: MusicSearchResult, trackNumber: Int) -> some View {
@@ -836,30 +919,13 @@ struct MusicProfileView: View {
                 }
             }
             
-            // Display Average Rating Stars (Read-only)
-            HStack(spacing: 8) {
-                ForEach(1...5, id: \.self) { star in
-                    let averageRating = profile?.averageRating ?? 0
-                    let starValue = Double(star)
-                    
-                    if starValue <= averageRating {
-                        // Fully filled star
-                        Image(systemName: "star.fill")
-                            .font(.title2)
-                            .foregroundColor(.orange)
-                    } else if starValue - averageRating < 1.0 && starValue > averageRating {
-                        // Partially filled star (for fractional ratings)
-                        Image(systemName: "star.leadinghalf.filled")
-                            .font(.title2)
-                            .foregroundColor(.orange)
-                    } else {
-                        // Empty star
-                        Image(systemName: "star")
-                            .font(.title2)
-                            .foregroundColor(.orange)
-                    }
-                }
-            }
+        // Display Average Rating Stars (Read-only)
+        StarRatingDisplayView(
+            rating: profile?.averageRating ?? 0,
+            starSize: 22,
+            spacing: 4,
+            showNumber: false
+        )
         }
         .padding()
         .background(Color(.systemBackground))
@@ -869,6 +935,7 @@ struct MusicProfileView: View {
 
     
     // MARK: - Comments Section
+    /* DEPRECATED: Old comments section - now using EnhancedSocialSection with logs
     private var commentsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -959,13 +1026,11 @@ struct MusicProfileView: View {
                         
                         // Show user's rating if available
                         if let userRating = getUserRating(for: comment.userId) {
-                            HStack(spacing: 1) {
-                                ForEach(1...5, id: \.self) { star in
-                                    Image(systemName: star <= userRating ? "star.fill" : "star")
-                                        .font(.caption2)
-                                        .foregroundColor(.yellow)
-                                }
-                            }
+                            StarRatingDisplayView(
+                                rating: Double(userRating),
+                                starSize: 10,
+                                spacing: 1
+                            )
                         }
                     }
                     Text(timeAgoString(from: comment.timestamp))
@@ -1133,8 +1198,7 @@ struct MusicProfileView: View {
         .background(Color(.systemGray6))
         .cornerRadius(12)
     }
-    
-    // MARK: - Helper Functions
+    */ // END DEPRECATED COMMENTS SECTION - Views above
     
     private func getUserRating(for userId: String) -> Int? {
         return userRatingsCache[userId]
@@ -1171,14 +1235,94 @@ struct MusicProfileView: View {
     }
     
     private func loadProfile() {
+        print("🔍 [MusicProfile] Starting to load profile for: \(musicItem.title)")
+        let profileStartTime = Date()
+        
         guard let userId = Auth.auth().currentUser?.uid else { return }
         let db = Firestore.firestore()
         
-        // Load ratings from the main logs collection using itemId
+        // Set a timeout for the query
+        let timeoutSeconds: Double = 5.0
+        var hasCompleted = false
+        
+        // Start timeout timer
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds) {
+            if !hasCompleted {
+                print("⚠️ [MusicProfile] Query timeout after \(timeoutSeconds)s - showing empty profile")
+                self.isLoading = false
+                // Show empty profile with no logs
+                self.profile = MusicProfile(
+                    id: self.musicItem.id,
+                    title: self.musicItem.title,
+                    artistName: self.musicItem.artistName,
+                    artworkURL: self.musicItem.artworkURL,
+                    itemType: self.musicItem.itemType,
+                    averageRating: 0.0,
+                    totalRatings: 0,
+                    totalLogs: 0,
+                    totalLikes: 0,
+                    totalDislikes: 0,
+                    userRating: nil,
+                    userLiked: nil,
+                    userDisliked: nil
+                )
+            }
+        }
+        
+        // Load ratings using universal track ID for cross-platform unification
+        Task {
+            let platform = musicItem.platform ?? "apple_music"
+            guard let universalTrackId = await getUniversalTrackId(for: musicItem.id, platform: platform) else {
+                print("⚠️ Could not find universal track for item: \(musicItem.id), falling back to itemId query")
+                // Fallback to old method if universal track not found
+                loadProfileByItemId(profileStartTime: profileStartTime, userId: userId, db: db, onComplete: { completed in
+                    hasCompleted = completed
+                })
+                return
+            }
+            
+            // Store the universal track ID for use in analytics
+            await MainActor.run {
+                self.universalTrackId = universalTrackId
+            }
+            
+            print("🎯 Loading profile for universal track: \(universalTrackId)")
+            
+            db.collection("logs")
+                .whereField("universalTrackId", isEqualTo: universalTrackId)
+                .getDocuments { snapshot, error in
+                    DispatchQueue.main.async {
+                        hasCompleted = true
+                        let elapsedTime = Date().timeIntervalSince(profileStartTime)
+                        print("🔍 [MusicProfile] Query completed in \(String(format: "%.2f", elapsedTime))s")
+                        
+                        if let error = error {
+                            print("Error loading profile: \(error.localizedDescription)")
+                            self.errorMessage = "Failed to load song profile"
+                            self.isLoading = false
+                            return
+                        }
+                        
+                        let documents = snapshot?.documents ?? []
+                        print("🔍 [MusicProfile] Found \(documents.count) logs for universal track")
+                        self.calculateAverageRatingFromAllUsers(documents: documents, currentUserId: userId)
+                        self.loadComments()
+                        self.loadUserRatings()
+                    }
+                }
+        }
+    }
+    
+    // Fallback method for old logs without universal track ID
+    private func loadProfileByItemId(profileStartTime: Date, userId: String, db: Firestore, onComplete: @escaping (Bool) -> Void) {
         db.collection("logs")
             .whereField("itemId", isEqualTo: musicItem.id)
             .getDocuments { snapshot, error in
                 DispatchQueue.main.async {
+                    onComplete(true)
+                    let elapsedTime = Date().timeIntervalSince(profileStartTime)
+                    print("🔍 [MusicProfile] Fallback query completed in \(String(format: "%.2f", elapsedTime))s")
+                    
                     if let error = error {
                         print("Error loading profile: \(error.localizedDescription)")
                         self.errorMessage = "Failed to load song profile"
@@ -1187,6 +1331,7 @@ struct MusicProfileView: View {
                     }
                     
                     let documents = snapshot?.documents ?? []
+                    print("🔍 [MusicProfile] Found \(documents.count) logs for this item (fallback)")
                     self.calculateAverageRatingFromAllUsers(documents: documents, currentUserId: userId)
                     self.loadComments()
                     self.loadUserRatings()
@@ -1197,30 +1342,40 @@ struct MusicProfileView: View {
     private func calculateAverageRatingFromAllUsers(documents: [QueryDocumentSnapshot], currentUserId: String) {
         var totalRating = 0.0
         var ratingCount = 0
-        var currentUserRating: Int?
+        var currentUserRating: Double? // Changed from Int? to Double? for half-star support
         var totalLikes = 0
         var totalDislikes = 0
         var currentUserLiked: Bool?
         var currentUserDisliked: Bool?
+        var mostRecentUserLog: (rating: Double, dateLogged: Date, isLiked: Bool?, thumbsDown: Bool?)? = nil
         
-        print("🔍 Calculating ratings from \(documents.count) documents for item: \(musicItem.id)")
+        // Reduced verbose logging
         
         for document in documents {
             let data = document.data()
-            print("📄 Document data: \(data)")
             
-            // Calculate ratings
-            if let rating = data["rating"] as? Int {
-                totalRating += Double(rating)
+            // Calculate ratings - handle both Int and Double for backwards compatibility
+            var rating: Double? = nil
+            if let doubleRating = data["rating"] as? Double {
+                rating = doubleRating
+            } else if let intRating = data["rating"] as? Int {
+                rating = Double(intRating)
+            }
+            
+            if let rating = rating {
+                totalRating += rating
                 ratingCount += 1
-                print("⭐ Found rating: \(rating)")
                 
-                // Check if this is the current user's rating
+                // Check if this is the current user's log and track the most recent one
                 if data["userId"] as? String == currentUserId {
-                    currentUserRating = rating
-                    currentUserLiked = data["isLiked"] as? Bool
-                    currentUserDisliked = data["thumbsDown"] as? Bool
-                    print("👤 Current user rating: \(rating)")
+                    let dateLogged = (data["dateLogged"] as? Timestamp)?.dateValue() ?? Date.distantPast
+                    let isLiked = data["isLiked"] as? Bool
+                    let thumbsDown = data["thumbsDown"] as? Bool
+                    
+                    // Update if this is the first user log or if it's more recent
+                    if mostRecentUserLog == nil || dateLogged > mostRecentUserLog!.dateLogged {
+                        mostRecentUserLog = (rating: rating, dateLogged: dateLogged, isLiked: isLiked, thumbsDown: thumbsDown)
+                    }
                 }
             }
             
@@ -1233,14 +1388,16 @@ struct MusicProfileView: View {
             }
         }
         
+        // Use the most recent user log if available - NO ROUNDING for half-star support
+        if let recentLog = mostRecentUserLog {
+            currentUserRating = recentLog.rating // Keep as Double, don't round
+            currentUserLiked = recentLog.isLiked
+            currentUserDisliked = recentLog.thumbsDown
+        }
+        
         let averageRating = ratingCount > 0 ? totalRating / Double(ratingCount) : 0.0
         
-        print("📊 Final calculation:")
-        print("   Total rating: \(totalRating)")
-        print("   Rating count: \(ratingCount)")
-        print("   Average rating: \(averageRating)")
-        print("   Total likes: \(totalLikes)")
-        print("   Total dislikes: \(totalDislikes)")
+        // Reduced verbose calculation logging
         
         let profile = MusicProfile(
             id: musicItem.id,
@@ -1250,6 +1407,7 @@ struct MusicProfileView: View {
             itemType: musicItem.itemType,
             averageRating: averageRating,
             totalRatings: ratingCount,
+            totalLogs: documents.count, // Total logs (rated + unrated)
             totalLikes: totalLikes,
             totalDislikes: totalDislikes,
             userRating: currentUserRating,
@@ -1258,176 +1416,124 @@ struct MusicProfileView: View {
         )
         
         self.profile = profile
-        self.userRating = currentUserRating ?? 0
+        self.userRating = currentUserRating ?? 0.0 // Changed from 0 to 0.0 for Double
         self.isLoading = false
     }
     
 
+    // MARK: - Universal Track Helper
     
-    private func loadComments() {
-        let db = Firestore.firestore()
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+    /// Get universal track ID from platform-specific ID for cross-platform queries
+    private func getUniversalTrackId(for platformItemId: String, platform: String) async -> String? {
+        let normalizedPlatform = platform.lowercased()
         
-        // Paged comments from logs by itemId
-        var q: Query = db.collection("logs")
-            .whereField("itemId", isEqualTo: musicItem.id)
-            .order(by: "dateLogged", descending: true)
-            .limit(to: 25)
-        q.getDocuments { snapshot, error in
-                DispatchQueue.main.async {
-                    if let error = error {
-                        print("Error loading comments: \(error.localizedDescription)")
-                        return
-                    }
-                    
-                    let documents = snapshot?.documents ?? []
-                self.lastCommentsDoc = documents.last
-                self.hasMoreComments = (documents.count == 25)
-                    var allComments: [MusicComment] = []
-                    let group = DispatchGroup()
-                    
-                    for doc in documents {
-                        let data = doc.data()
-                        
-                        // Check for both "review" and "comment" fields
-                        let review = data["review"] as? String ?? ""
-                        let comment = data["comment"] as? String ?? ""
-                        let actualComment = review.isEmpty ? comment : review
-                        
-                        let timestamp = (data["dateLogged"] as? Timestamp)?.dateValue() ?? Date()
-                        let userId = data["userId"] as? String ?? ""
-                        let id = doc.documentID
-                        
-                        print("🔍 Checking document \(id) for comments:")
-                        print("   Review field: '\(review)'")
-                        print("   Comment field: '\(comment)'")
-                        print("   Using: '\(actualComment)'")
-                        
-                        // Only include logs with actual comments/reviews
-                        if !actualComment.isEmpty {
-                            group.enter()
-                            
-                            // Get user profile for username and profile image
-                            let userDoc = db.collection("users").document(userId)
-                            userDoc.getDocument { userSnapshot, userError in
-                                let username = userSnapshot?.data()?["username"] as? String ?? "Anonymous"
-                                let userProfileImage = userSnapshot?.data()?["profilePictureUrl"] as? String
-                                
-                                // Get user interaction state for this comment
-                                let interactionId = "\(currentUserId)_\(id)"
-                                db.collection("commentInteractions").document(interactionId).getDocument { interactionSnapshot, interactionError in
-                                    var userLiked: Bool? = nil
-                                    var userDisliked: Bool? = nil
-                                    
-                                    if let interactionData = interactionSnapshot?.data(),
-                                       let interactionType = interactionData["interactionType"] as? String {
-                                        userLiked = interactionType == "like"
-                                        userDisliked = interactionType == "dislike"
-                                    }
-                                    
-                                    // Get like/dislike counts from commentInteractions collection
-                                    db.collection("commentInteractions")
-                                        .whereField("commentId", isEqualTo: id)
-                                        .getDocuments { interactionsSnapshot, interactionsError in
-                                            var likes = 0
-                                            var dislikes = 0
-                                            
-                                            if let interactions = interactionsSnapshot?.documents {
-                                                for interaction in interactions {
-                                                    if let type = interaction.data()["interactionType"] as? String {
-                                                        if type == "like" {
-                                                            likes += 1
-                                                        } else if type == "dislike" {
-                                                            dislikes += 1
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            
-                                            let musicComment = MusicComment(
-                                                id: id,
-                                                userId: userId,
-                                                username: username,
-                                                userProfileImage: userProfileImage,
-                                                comment: actualComment,
-                                                timestamp: timestamp,
-                                                likes: likes,
-                                                dislikes: dislikes,
-                                                userLiked: userLiked,
-                                                userDisliked: userDisliked
-                                            )
-                                            
-                                            // Load replies for this comment
-                                            db.collection("commentReplies")
-                                                .whereField("commentId", isEqualTo: id)
-                                                .getDocuments { repliesSnapshot, repliesError in
-                                                    var replies: [CommentReply] = []
-                                                    
-                                                    if let error = repliesError {
-                                                        print("❌ Error loading replies: \(error.localizedDescription)")
-                                                    }
-                                                    
-                                                    if let repliesDocs = repliesSnapshot?.documents {
-                                                        print("🔍 Found \(repliesDocs.count) replies for comment \(id)")
-                                                        for replyDoc in repliesDocs {
-                                                            if let reply = try? replyDoc.data(as: CommentReply.self) {
-                                                                replies.append(reply)
-                                                                print("✅ Loaded reply: '\(reply.reply)' from \(reply.username)")
-                                                            } else {
-                                                                print("❌ Failed to decode reply: \(replyDoc.documentID)")
-                                                            }
-                                                        }
-                                                    } else {
-                                                        print("📭 No replies found for comment \(id)")
-                                                    }
-                                                    
-                                                    var commentWithReplies = musicComment
-                                                    // Sort replies by engagement score (likes + dislikes), then by timestamp
-                                                    commentWithReplies.replies = replies.sorted { reply1, reply2 in
-                                                        let engagement1 = reply1.likes + reply1.dislikes
-                                                        let engagement2 = reply2.likes + reply2.dislikes
-                                                        
-                                                        if engagement1 != engagement2 {
-                                                            return engagement1 > engagement2 // Higher engagement first
-                                                        } else {
-                                                            return reply1.timestamp < reply2.timestamp // Older first if same engagement (for threaded display)
-                                                        }
-                                                    }
-                                                    
-                                                    DispatchQueue.main.async {
-                                                        allComments.append(commentWithReplies)
-                                                        // Sort by engagement score (likes + dislikes + reply count * 3), then by timestamp
-                                                        self.comments = allComments.sorted { comment1, comment2 in
-                                                            let engagement1 = comment1.likes + comment1.dislikes + (comment1.replies.count * 3)
-                                                            let engagement2 = comment2.likes + comment2.dislikes + (comment2.replies.count * 3)
-                                                            
-                                                            if engagement1 != engagement2 {
-                                                                return engagement1 > engagement2 // Higher engagement first
-                                                            } else {
-                                                                return comment1.timestamp > comment2.timestamp // Newer first if same engagement
-                                                            }
-                                                        }
-                                                        print("✅ Added comment: '\(actualComment)' from user: \(username) with \(likes) likes, \(dislikes) dislikes and \(replies.count) replies")
-                                                    }
-                                                }
-                                            
-                                            group.leave()
-                                        }
-                                }
-                            }
-                        }
-                    }
-                    
-                    group.notify(queue: .main) {
-                        print("🎉 Finished loading all comments")
-                    }
-                }
-            }
+        if normalizedPlatform == "apple_music" {
+            let appleMusicId = isLikelyAppleMusicId(platformItemId) ? platformItemId : nil
+            let track = await TrackMatchingService.shared.getUniversalTrack(
+                title: musicItem.title,
+                artist: musicItem.artistName,
+                albumName: musicItem.albumName,
+                appleMusicId: appleMusicId
+            )
+            return track.id
+        } else if normalizedPlatform == "spotify" {
+            let track = await TrackMatchingService.shared.getUniversalTrack(
+                title: musicItem.title,
+                artist: musicItem.artistName,
+                albumName: musicItem.albumName,
+                spotifyId: platformItemId
+            )
+            return track.id
+        } else {
+            // Local/offline items: fall back to fuzzy matching without platform ID
+            let track = await TrackMatchingService.shared.getUniversalTrack(
+                title: musicItem.title,
+                artist: musicItem.artistName,
+                albumName: musicItem.albumName,
+                appleMusicId: nil
+            )
+            return track.id
+        }
     }
     
-
+    private func isLikelyAppleMusicId(_ id: String) -> Bool {
+        guard !id.isEmpty else { return false }
+        let digits = CharacterSet.decimalDigits
+        let isNumeric = id.unicodeScalars.allSatisfy { digits.contains($0) }
+        // Apple Music IDs are typically <= 15 digits; persistent IDs are usually longer
+        return isNumeric && (5...15).contains(id.count)
+    }
     
-
+    private func loadComments() {
+        // First get the universal track ID for cross-platform queries
+        Task {
+            let platform = musicItem.platform ?? "apple_music" // Detect from musicItem
+            guard let universalTrackId = await getUniversalTrackId(for: musicItem.id, platform: platform) else {
+                print("⚠️ Could not find universal track for item: \(musicItem.id)")
+                // Fallback to old method if universal track not found
+                await loadCommentsByItemId()
+                return
+            }
+            
+            print("🎯 Loading logs for universal track: \(universalTrackId)")
+            
+            let db = Firestore.firestore()
+            
+            // Query by universalTrackId instead of itemId for cross-platform unification
+            db.collection("logs")
+                .whereField("universalTrackId", isEqualTo: universalTrackId)
+                .order(by: "dateLogged", descending: true)
+                .limit(to: 10)
+                .getDocuments { snapshot, error in
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            print("❌ Error loading community logs: \(error.localizedDescription)")
+                            return
+                        }
+                        
+                        let documents = snapshot?.documents ?? []
+                        let logs = documents.compactMap { doc -> MusicLog? in
+                            try? doc.data(as: MusicLog.self)
+                        }
+                        
+                        print("✅ Loaded \(logs.count) cross-platform logs")
+                        
+                        // Sort by engagement score
+                        self.communityLogs = EngagementScoringService.shared.sortByEngagement(logs)
+                    }
+                }
+        }
+    }
+    
+    /// Fallback method for backwards compatibility with old logs without universalTrackId
+    private func loadCommentsByItemId() async {
+        let db = Firestore.firestore()
+        
+        await MainActor.run {
+            db.collection("logs")
+                .whereField("itemId", isEqualTo: musicItem.id)
+                .order(by: "dateLogged", descending: true)
+                .limit(to: 10)
+                .getDocuments { snapshot, error in
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            print("❌ Error loading community logs (fallback): \(error.localizedDescription)")
+                            return
+                        }
+                        
+                        let documents = snapshot?.documents ?? []
+                        let logs = documents.compactMap { doc -> MusicLog? in
+                            try? doc.data(as: MusicLog.self)
+                        }
+                        
+                        print("⚠️ Loaded \(logs.count) logs using fallback itemId query")
+                        
+                        // Sort by engagement score
+                        self.communityLogs = EngagementScoringService.shared.sortByEngagement(logs)
+                    }
+                }
+        }
+    }
     
     private func toggleCommentLike(_ comment: MusicComment) {
         guard let currentUserId = Auth.auth().currentUser?.uid else { return }
@@ -1683,6 +1789,7 @@ struct MusicProfileView: View {
         }
     }
 
+    /* DEPRECATED: Old comment functions
     private func loadMoreComments() {
         let db = Firestore.firestore()
         guard let currentUserId = Auth.auth().currentUser?.uid else { return }
@@ -1752,6 +1859,7 @@ struct MusicProfileView: View {
             comments[index].isExpanded.toggle()
         }
     }
+    */ // END DEPRECATED COMMENT FUNCTIONS
     
     // MARK: - Reply Row View
     private func replyRow(_ reply: CommentReply, parentComment: MusicComment) -> some View {
@@ -1789,13 +1897,11 @@ struct MusicProfileView: View {
                         
                         // Show user's rating if available
                         if let userRating = getUserRating(for: reply.userId) {
-                            HStack(spacing: 1) {
-                                ForEach(1...5, id: \.self) { star in
-                                    Image(systemName: star <= userRating ? "star.fill" : "star")
-                                        .font(.caption2)
-                                        .foregroundColor(.yellow)
-                                }
-                            }
+                            StarRatingDisplayView(
+                                rating: Double(userRating),
+                                starSize: 10,
+                                spacing: 1
+                            )
                         }
                     }
                     Text(timeAgoString(from: reply.timestamp))
@@ -2423,16 +2529,11 @@ extension MusicProfileView {
                 
                 // Track rating
                 let avg = trackRatings[track.id] ?? 0.0
-                HStack(spacing: 2) {
-                    ForEach(1...5, id: \.self) { star in
-                        Image(systemName: avg >= Double(star) - 0.25 ? "star.fill" : avg >= Double(star) - 0.75 ? "star.leadinghalf.filled" : "star")
-                            .font(.caption2)
-                            .foregroundColor(.yellow)
-                    }
-                    Text(String(format: "%.1f", avg))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+                StarRatingDisplayView(
+                    rating: avg,
+                    starSize: 10,
+                    spacing: 1
+                )
                 
                 // Chevron indicator
                 Image(systemName: "chevron.right")
@@ -2484,7 +2585,7 @@ extension MusicProfileView {
                     self.albumTracks = foundTracks
                     self.isLoadingTracks = false
                     self.trackRatings = [:]
-                    self.loadTrackRatings()
+                    Task { await self.loadTrackRatings() }
                     print("📱 Updated UI with \(foundTracks.count) tracks")
                 }
                 
@@ -2677,37 +2778,100 @@ extension MusicProfileView {
     }
     
     // MARK: - Track Ratings Loader
-    private func loadTrackRatings() {
-        trackRatings = [:]
-        let ids = albumTracks.map { $0.id }
-        guard !ids.isEmpty else { return }
+    private func loadTrackRatings() async {
         let db = Firestore.firestore()
-        var ratingsAccumulator: [String: (Double, Int)] = [:]
-        let batches = stride(from: 0, to: ids.count, by: 10).map { Array(ids[$0..<min($0+10, ids.count)]) }
-        let group = DispatchGroup()
-        for batch in batches {
-            group.enter()
-            db.collection("logs").whereField("itemId", in: batch).getDocuments { snapshot, error in
-                defer { group.leave() }
-                guard error == nil, let docs = snapshot?.documents else { return }
-                for doc in docs {
-                    let data = doc.data()
-                    guard let itemId = data["itemId"] as? String, let rating = data["rating"] as? Int else { continue }
-                    var entry = ratingsAccumulator[itemId] ?? (0,0)
-                    entry.0 += Double(rating)
-                    entry.1 += 1
-                    ratingsAccumulator[itemId] = entry
+        var final: [String: Double] = [:]
+        
+        await withTaskGroup(of: (String, Double).self) { group in
+            for track in albumTracks {
+                group.addTask {
+                    let average = await fetchAverageRating(for: track, db: db)
+                    return (track.id, average)
                 }
             }
-        }
-        group.notify(queue: .main) {
-            var final: [String: Double] = [:]
-            for (id, tuple) in ratingsAccumulator {
-                let (total, count) = tuple
-                final[id] = count > 0 ? total / Double(count) : 0.0
+            
+            for await (id, avg) in group {
+                final[id] = avg
             }
-            self.trackRatings = final
         }
+        
+        await MainActor.run {
+            self.trackRatings = final
+            self.trackRatingsLoadedIds = Set(albumTracks.map { $0.id })
+        }
+    }
+    
+    private func fetchAverageRating(for track: MusicSearchResult, db: Firestore) async -> Double {
+        do {
+            // Prefer universal track ID for cross-platform aggregation
+            if let universalId = await getUniversalTrackId(
+                itemId: track.id,
+                title: track.title,
+                artistName: track.artistName,
+                albumName: track.albumName
+            ) {
+                if let avg = try await averageRating(universalTrackId: universalId, db: db) {
+                    return avg
+                }
+            }
+            
+            // Fallback to itemId/itemType
+            if let avg = try await averageRating(itemId: track.id, itemType: track.itemType, db: db) {
+                return avg
+            }
+        } catch {
+            print("❌ Error fetching rating for track \(track.title): \(error)")
+        }
+        
+        return 0.0
+    }
+    
+    private func averageRating(universalTrackId: String, db: Firestore) async throws -> Double? {
+        let snapshot = try await db.collection("logs")
+            .whereField("universalTrackId", isEqualTo: universalTrackId)
+            .getDocuments()
+        return computeAverage(from: snapshot)
+    }
+    
+    private func averageRating(itemId: String, itemType: String, db: Firestore) async throws -> Double? {
+        let snapshot = try await db.collection("logs")
+            .whereField("itemId", isEqualTo: itemId)
+            .whereField("itemType", isEqualTo: itemType)
+            .getDocuments()
+        return computeAverage(from: snapshot)
+    }
+    
+    private func computeAverage(from snapshot: QuerySnapshot) -> Double? {
+        var total = 0.0
+        var count = 0
+        for doc in snapshot.documents {
+            let data = doc.data()
+            if let rating = data["rating"] as? Double {
+                total += rating
+                count += 1
+            } else if let ratingInt = data["rating"] as? Int {
+                total += Double(ratingInt)
+                count += 1
+            }
+        }
+        guard count > 0 else { return nil }
+        return total / Double(count)
+    }
+    
+    /// Get universal track ID for cross-platform rating aggregation
+    private func getUniversalTrackId(
+        itemId: String,
+        title: String,
+        artistName: String,
+        albumName: String?
+    ) async -> String? {
+        let universalTrack = await TrackMatchingService.shared.getUniversalTrack(
+            title: title,
+            artist: artistName,
+            albumName: albumName,
+            appleMusicId: itemId
+        )
+        return universalTrack.id
     }
 
     private func navigateToSongProfile(_ track: MusicSearchResult) {

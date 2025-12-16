@@ -1,5 +1,6 @@
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct ListDetailView: View {
     let list: MusicList
@@ -10,6 +11,40 @@ struct ListDetailView: View {
     var onDelete: (() -> Void)?
     @Environment(\.presentationMode) var presentationMode
     @State private var showingDeleteAlert = false
+    
+    // Playlist creation states
+    @StateObject private var unifiedSearchService = UnifiedMusicSearchService.shared
+    @StateObject private var playlistService = PlaylistCreationService.shared
+    @State private var isCreatingPlaylist = false
+    @State private var showingCreatePlaylistMenu = false
+    @State private var showingResultAlert = false
+    @State private var playlistResult: PlaylistCreationService.PlaylistCreationResult?
+    
+    // Ratings for items in the list
+    @State private var itemRatings: [String: (average: Double, count: Int)] = [:]
+    private let db = Firestore.firestore()
+    
+    // Navigation state
+    @State private var selectedMusicResult: MusicSearchResult?
+    @State private var selectedArtistName: String?
+    @State private var showArtistProfile = false
+    
+    // Check if list has at least one song
+    private var hasSongs: Bool {
+        let songs = playlistService.filterSongsFromList(list)
+        return !songs.isEmpty
+    }
+    
+    // Check which platforms user wants and is authenticated for
+    private var canCreateAppleMusicPlaylist: Bool {
+        let pref = unifiedSearchService.platformPreference
+        return (pref == .appleMusicOnly || pref == .both || pref == .appleMusicPrimary)
+    }
+    
+    private var canCreateSpotifyPlaylist: Bool {
+        let pref = unifiedSearchService.platformPreference
+        return (pref == .spotifyOnly || pref == .both || pref == .spotifyPrimary)
+    }
     
     var body: some View {
         NavigationView {
@@ -23,14 +58,6 @@ struct ListDetailView: View {
                         Text(desc)
                             .font(.body)
                             .foregroundColor(.secondary)
-                    }
-                    HStack {
-                        Button(action: { toggleListRepost() }) {
-                            Label("Repost", systemImage: "arrow.2.squarepath")
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.purple)
-                        Spacer()
                     }
                 }
                 .padding()
@@ -83,16 +110,51 @@ struct ListDetailView: View {
                 }
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    if isOwner {
-                        Menu {
-                            Button("Edit List") {
-                                onEdit?()
+                    HStack(spacing: 12) {
+                        // Create Playlist Button (for non-owners or always show)
+                        // HIDDEN: Temporarily disabled while playlist creation is being fixed
+                        /*
+                        if hasSongs {
+                            createPlaylistButton
+                        }
+                        */
+                        
+                        // Edit/Delete Menu (for owners only)
+                        if isOwner {
+                            Menu {
+                                // Create Playlist options in menu for owners
+                                // HIDDEN: Temporarily disabled while playlist creation is being fixed
+                                /*
+                                if hasSongs {
+                                    if canCreateAppleMusicPlaylist {
+                                        Button(action: {
+                                            createPlaylist(platform: "apple_music")
+                                        }) {
+                                            Label("Create Apple Music Playlist", systemImage: "music.note")
+                                        }
+                                    }
+                                    
+                                    if canCreateSpotifyPlaylist {
+                                        Button(action: {
+                                            createPlaylist(platform: "spotify")
+                                        }) {
+                                            Label("Create Spotify Playlist", systemImage: "music.note")
+                                        }
+                                    }
+                                    
+                                    Divider()
+                                }
+                                */
+                                
+                                Button("Edit List") {
+                                    onEdit?()
+                                }
+                                Button("Delete List", role: .destructive) {
+                                    showingDeleteAlert = true
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
                             }
-                            Button("Delete List", role: .destructive) {
-                                showingDeleteAlert = true
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
                         }
                     }
                 }
@@ -106,6 +168,184 @@ struct ListDetailView: View {
             } message: {
                 Text("Are you sure you want to delete '\(list.title)'? This action cannot be undone.")
             }
+            .alert(
+                playlistResult?.platform ?? "Playlist",
+                isPresented: $showingResultAlert,
+                presenting: playlistResult
+            ) { result in
+                if result.success {
+                    Button("Open in \(result.platform)") {
+                        openPlaylist(result: result)
+                    }
+                    Button("Done", role: .cancel) {}
+                } else {
+                    Button("OK", role: .cancel) {}
+                }
+            } message: { result in
+                if result.success {
+                    if let skipped = result.skippedMessage {
+                        Text("Playlist '\(result.playlistName)' created with \(result.addedSongs) song\(result.addedSongs == 1 ? "" : "s")! \(skipped).")
+                    } else {
+                        Text("Playlist '\(result.playlistName)' created successfully with \(result.addedSongs) song\(result.addedSongs == 1 ? "" : "s")!")
+                    }
+                } else {
+                    Text(result.error?.localizedDescription ?? "Failed to create playlist")
+                }
+            }
+            .overlay {
+                if isCreatingPlaylist {
+                    ZStack {
+                        Color.black.opacity(0.4)
+                            .ignoresSafeArea()
+                        
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .scaleEffect(1.5)
+                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            
+                            Text("Creating playlist...")
+                                .font(.subheadline)
+                                .foregroundColor(.white)
+                        }
+                        .padding(32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(.ultraThinMaterial)
+                        )
+                    }
+                }
+            }
+            .onAppear {
+                fetchRatingsForItems()
+            }
+            .fullScreenCover(item: $selectedMusicResult) { music in
+                MusicProfileView(musicItem: music, pinnedLog: nil)
+            }
+            .fullScreenCover(isPresented: $showArtistProfile) {
+                if let artistName = selectedArtistName {
+                    ArtistProfileView(artistName: artistName)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Fetch Ratings
+    
+    private func fetchRatingsForItems() {
+        Task {
+            var ratings: [String: (average: Double, count: Int)] = [:]
+            
+            // Parse all items and extract song IDs
+            var songIds: [String] = []
+            for item in list.items {
+                if let data = item.data(using: .utf8),
+                   let result = try? JSONDecoder().decode(MusicSearchResult.self, from: data),
+                   result.itemType == "song" {
+                    songIds.append(result.id)
+                }
+            }
+            
+            // Fetch ratings for each song
+            for songId in songIds {
+                do {
+                    let snapshot = try await db.collection("logs")
+                        .whereField("itemId", isEqualTo: songId)
+                        .whereField("itemType", isEqualTo: "song")
+                        .getDocuments()
+                    
+                    let logs = snapshot.documents.compactMap { try? $0.data(as: MusicLog.self) }
+                    let ratingsList = logs.compactMap { $0.rating }
+                    
+                    if !ratingsList.isEmpty {
+                        let average = Double(ratingsList.reduce(0, +)) / Double(ratingsList.count)
+                        let count = ratingsList.count
+                        ratings[songId] = (average, count)
+                    }
+                } catch {
+                    print("❌ Failed to fetch ratings for song \(songId): \(error)")
+                }
+            }
+            
+            await MainActor.run {
+                itemRatings = ratings
+            }
+        }
+    }
+    
+    // MARK: - Create Playlist Button (for non-owners)
+    
+    @ViewBuilder
+    private var createPlaylistButton: some View {
+        if !isOwner {
+            // For non-owners, show standalone button(s)
+            if canCreateAppleMusicPlaylist && canCreateSpotifyPlaylist {
+                // Show menu with both options
+                Menu {
+                    Button(action: {
+                        createPlaylist(platform: "apple_music")
+                    }) {
+                        Label("Apple Music", systemImage: "applelogo")
+                    }
+                    
+                    Button(action: {
+                        createPlaylist(platform: "spotify")
+                    }) {
+                        Label("Spotify", systemImage: "music.note")
+                    }
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.title3)
+                }
+            } else if canCreateAppleMusicPlaylist {
+                // Single Apple Music button
+                Button(action: {
+                    createPlaylist(platform: "apple_music")
+                }) {
+                    Image(systemName: "plus.circle")
+                        .font(.title3)
+                }
+            } else if canCreateSpotifyPlaylist {
+                // Single Spotify button
+                Button(action: {
+                    createPlaylist(platform: "spotify")
+                }) {
+                    Image(systemName: "plus.circle")
+                        .font(.title3)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Playlist Creation Logic
+    
+    private func createPlaylist(platform: String) {
+        isCreatingPlaylist = true
+        
+        Task {
+            let songs = playlistService.filterSongsFromList(list)
+            let result: PlaylistCreationService.PlaylistCreationResult
+            
+            if platform == "apple_music" {
+                result = await playlistService.createAppleMusicPlaylist(name: list.title, songs: songs)
+            } else {
+                result = await playlistService.createSpotifyPlaylist(name: list.title, songs: songs)
+            }
+            
+            await MainActor.run {
+                isCreatingPlaylist = false
+                playlistResult = result
+                showingResultAlert = true
+            }
+        }
+    }
+    
+    private func openPlaylist(result: PlaylistCreationService.PlaylistCreationResult) {
+        guard let playlistId = result.playlistId else { return }
+        
+        if result.platform == "Apple Music" {
+            playlistService.openAppleMusicPlaylist(playlistId: playlistId)
+        } else {
+            playlistService.openSpotifyPlaylist(playlistId: playlistId)
         }
     }
     
@@ -130,6 +370,36 @@ struct ListDetailView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                    // Rating display (only for songs)
+                    if result.itemType == "song" {
+                        if let rating = itemRatings[result.id], rating.count > 0 {
+                            HStack(spacing: 4) {
+                                Text(String(format: "%.1f", rating.average))
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.primary)
+                                
+                                StarRatingView(rating: rating.average, size: 8)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.purple.opacity(0.1))
+                            )
+                        } else {
+                            Text("No ratings yet")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(Color.purple.opacity(0.1))
+                                )
+                        }
+                    } else {
+                        // For non-songs, show item type
                     Text(result.itemType.capitalized)
                         .font(.caption2)
                         .foregroundColor(.purple)
@@ -139,6 +409,7 @@ struct ListDetailView: View {
                             RoundedRectangle(cornerRadius: 4)
                                 .fill(Color.purple.opacity(0.1))
                         )
+                    }
                 }
                 
                 Spacer()
@@ -160,6 +431,17 @@ struct ListDetailView: View {
                     .fill(Color(.systemBackground))
                     .shadow(color: Color.black.opacity(0.05), radius: 2, x: 0, y: 1)
             )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // Navigate based on item type
+                if result.itemType == "artist" {
+                    selectedArtistName = result.artistName
+                    showArtistProfile = true
+                } else {
+                    // For songs and albums, navigate to music profile
+                    selectedMusicResult = result
+                }
+            }
         } else {
             // Legacy format - show basic text
             HStack {
@@ -202,15 +484,4 @@ struct ListDetailView: View {
         }
     }
     
-    private func toggleListRepost() {
-        guard let uid = Auth.auth().currentUser?.uid else { return }
-        // Treat list repost as item-level with itemType "list"
-        Repost.hasReposted(userId: uid, itemId: list.id, itemType: "list") { exists in
-            if exists {
-                Repost.remove(forUser: uid, itemId: list.id, itemType: "list") { _ in }
-            } else {
-                Repost.add(Repost(itemId: list.id, itemType: "list", userId: uid)) { _ in }
-            }
-        }
-    }
 } 

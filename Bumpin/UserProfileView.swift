@@ -15,8 +15,13 @@ enum PinnedType { case song, artist, album }
 
 // Genre detail navigation item
 struct GenreDetailItem: Identifiable {
-    let id = UUID()
+    let id: String
     let genre: String
+    
+    init(genre: String) {
+        self.genre = genre
+        self.id = genre.lowercased()
+    }
 }
 
 // Add StatCategory at the top level
@@ -45,20 +50,43 @@ enum StatCategory: Identifiable {
     }
 }
 
+// MARK: - LazyView Wrapper for Memory Safety
+struct LazyView<Content: View>: View {
+    let build: () -> Content
+    init(_ build: @autoclosure @escaping () -> Content) {
+        self.build = build
+    }
+    var body: Content {
+        build()
+    }
+}
+
 struct UserProfileView: View {
     let userId: String?
+    let showFullProfile: Bool // If false, only show overview even for current user
+    let prefetchedProfile: UserProfile? // Optional pre-fetched profile to prevent crashes
+    let showDismissButton: Bool // If true, show dismiss button even for current user (e.g., when opened from search)
+    
+    init(userId: String?, showFullProfile: Bool = true, prefetchedProfile: UserProfile? = nil, showDismissButton: Bool = false) {
+        self.userId = userId
+        self.showFullProfile = showFullProfile
+        self.prefetchedProfile = prefetchedProfile
+        self.showDismissButton = showDismissButton
+    }
+    
     @Environment(\.dismiss) private var dismiss
     @State private var profile: UserProfile?
     @State private var logs: [MusicLog] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var selectedLog: MusicLog?
-    @State private var selectedTab: ProfileTab = .diary
+    @State private var selectedTab: ProfileTab = .overview
     @State private var logToEdit: MusicLog?
     @State private var showingLogMusicView = false
     @State private var userLists: [MusicList] = []
     @State private var isLoadingLists = false
     @State private var showCreateListSheet = false
+    @State private var listCoverImages: [String: URL] = [:]
     @State private var selectedList: MusicList?
     @State private var showEditListSheet = false
     @State private var listToEdit: MusicList?
@@ -70,8 +98,6 @@ struct UserProfileView: View {
     @State private var showReorderPinnedArtists = false
     @State private var showReorderPinnedAlbums = false
     @State private var showEditPinnedAlbums = false
-    @State private var showEditPinnedLists = false
-    @State private var showReorderPinnedLists = false
     @State private var showHeaderPicker = false
     @State private var headerImage: UIImage? = nil
     // Navigation targets
@@ -85,6 +111,16 @@ struct UserProfileView: View {
     @State private var selectedListenLaterTab = 0
     @State private var selectedConversation: Conversation? = nil
     @State private var showingSettings = false
+    @State private var showBlockedUsers = false
+    @State private var showReportsAdmin = false
+    @State private var showReportSheet = false
+    @State private var showBlockSheet = false
+    // Followers/Following list navigation
+    @State private var showFollowersList = false
+    @State private var showFollowingList = false
+    // Alert for follow/unfollow errors
+    @State private var showAlert = false
+    @State private var alertMessage = ""
     // Music profile navigation
     @State private var selectedMusicItem: MusicSearchResult? = nil
     @State private var selectedPinnedLog: MusicLog? = nil
@@ -99,7 +135,12 @@ struct UserProfileView: View {
     @State private var showRankingForSongs = true
     @State private var showRankingForArtists = true
     @State private var showRankingForAlbums = true
-    @State private var showRankingForLists = true
+    @State private var selectedRatingBucket: RatingDistributionData?
+    @StateObject private var blockingService = BlockingService.shared
+    
+    // Verified block status (async check against authoritative source)
+    @State private var verifiedBlockedByUser: Bool? = nil
+    @State private var isVerifyingBlockStatus: Bool = false
     
     // Listen Later section state
     @State private var selectedListenLaterSection: ListenLaterItemType = .song
@@ -117,21 +158,24 @@ struct UserProfileView: View {
     // Cache genre data to prevent pie chart spinning
     @State private var cachedGenreData: [GenreData] = []
     @State private var lastLogCount: Int = 0
+    @State private var genreLogsByName: [String: [MusicLog]] = [:]
     
     // Reposts state
     @State private var userReposts: [Repost] = []
+    @State private var repostedLogs: [MusicLog] = [] // The actual logs that were reposted
     @State private var isLoadingReposts = false
 
     // Removed duplicate View extension that caused invalid redeclaration at file scope.
     
     @StateObject var viewModel: UserProfileViewModel = UserProfileViewModel()
     @EnvironmentObject var nowPlayingManager: NowPlayingManager
+    @EnvironmentObject var adminState: AdminState
     @Namespace private var pinnedBadgeNS
     
     enum ProfileTab: String, CaseIterable, Identifiable {
-        case overview = "Overview"
-        case diary = "Diary"
-        case lists = "Lists"
+        case overview = "Profile"
+        case diary = "Logs"
+        case lists = "Playlists"
         case listenLater = "Listen Later"
         var id: String { rawValue }
     }
@@ -224,7 +268,7 @@ struct UserProfileView: View {
             } else {
                 print("✅ Successfully updated pinned songs")
                 DispatchQueue.main.async {
-                    self.fetchProfileAndLogs()
+                    self.fetchProfileAndLogs(forceProfileRefresh: true)
                 }
             }
         }
@@ -252,7 +296,7 @@ struct UserProfileView: View {
             } else {
                 print("✅ Successfully updated pinned artists")
                 DispatchQueue.main.async {
-                    self.fetchProfileAndLogs()
+                    self.fetchProfileAndLogs(forceProfileRefresh: true)
                 }
             }
         }
@@ -280,35 +324,7 @@ struct UserProfileView: View {
             } else {
                 print("✅ Successfully updated pinned albums")
                 DispatchQueue.main.async {
-                    self.fetchProfileAndLogs()
-                }
-            }
-        }
-    }
-    
-    private func updatePinnedLists(_ updatedItems: [PinnedItem]) {
-        guard let userId = userId ?? Auth.auth().currentUser?.uid else { return }
-        
-        let db = Firestore.firestore()
-        db.collection("users").document(userId).updateData([
-            "pinnedLists": updatedItems.map { item in
-                [
-                    "id": item.id,
-                    "title": item.title,
-                    "artistName": item.artistName,
-                    "albumName": item.albumName ?? "",
-                    "artworkURL": item.artworkURL ?? "",
-                    "itemType": item.itemType,
-                    "dateAdded": item.dateAdded
-                ]
-            }
-        ]) { error in
-            if let error = error {
-                print("❌ Error updating pinned lists: \(error.localizedDescription)")
-            } else {
-                print("✅ Successfully updated pinned lists")
-                DispatchQueue.main.async {
-                    self.fetchProfileAndLogs()
+                    self.fetchProfileAndLogs(forceProfileRefresh: true)
                 }
             }
         }
@@ -320,153 +336,234 @@ struct UserProfileView: View {
         
         isLoadingReposts = true
         
-        let db = Firestore.firestore()
+        print("🔍 [Reposts] Fetching reposts for user: \(userId)")
         
-        // Query both item reposts and log reposts
-        let itemRepostsQuery = db.collectionGroup("reposts")
-            .whereField("userId", isEqualTo: userId)
-        
-        itemRepostsQuery.getDocuments { snapshot, error in
-            DispatchQueue.main.async {
-                self.isLoadingReposts = false
+        Task {
+            let db = Firestore.firestore()
+            
+            do {
+                // Use collection group query to find all reposts by this user
+                let repostsSnapshot = try await db.collectionGroup("reposts")
+                    .whereField("userId", isEqualTo: userId)
+                    .getDocuments()
                 
-                if let error = error {
-                    print("❌ Error fetching user reposts: \(error)")
-                    return
+                print("🔍 [Reposts] Found \(repostsSnapshot.documents.count) repost documents")
+                
+                var repostedLogs: [(Repost, MusicLog)] = []
+                
+                for repostDoc in repostsSnapshot.documents {
+                    // Extract the log ID from the document reference path
+                    // Path format: logs/{logId}/reposts/{userId}
+                    let pathComponents = repostDoc.reference.path.components(separatedBy: "/")
+                    guard pathComponents.count >= 2,
+                          pathComponents[0] == "logs",
+                          let logId = pathComponents.dropFirst().first else {
+                        continue
+                    }
+                    
+                    print("🔍 [Reposts] Processing repost for log: \(logId)")
+                    
+                    // Fetch the log
+                    let logDoc = try await db.collection("logs").document(logId).getDocument()
+                    
+                    guard logDoc.exists,
+                          let log = try? logDoc.data(as: MusicLog.self),
+                          let timestamp = (repostDoc.data()["timestamp"] as? Timestamp)?.dateValue() else {
+                        print("⚠️ [Reposts] Log not found or invalid for: \(logId)")
+                        continue
+                    }
+                    
+                    var repost = Repost(logId: log.id, userId: userId)
+                    repost.id = repostDoc.documentID
+                    repost.createdAt = timestamp
+                    
+                    repostedLogs.append((repost, log))
+                    print("✅ [Reposts] Added repost: \(log.title)")
                 }
                 
-                let reposts = snapshot?.documents.compactMap { try? $0.data(as: Repost.self) } ?? []
-                self.userReposts = reposts.sorted { $0.createdAt > $1.createdAt }
-                print("✅ Fetched \(reposts.count) reposts for user")
+                // Sort by repost date (most recent first)
+                repostedLogs.sort { $0.0.createdAt > $1.0.createdAt }
+                
+                print("✅ [Reposts] Total reposts loaded: \(repostedLogs.count)")
+                
+                await MainActor.run {
+                    self.userReposts = repostedLogs.map { $0.0 }
+                    self.repostedLogs = repostedLogs.map { $0.1 }
+                    self.isLoadingReposts = false
+                }
+                
+            } catch {
+                print("❌ Error fetching reposts: \(error)")
+                await MainActor.run {
+                    self.isLoadingReposts = false
+                }
             }
+        }
+    }
+    
+    @MainActor
+    private func refreshProfile() async {
+        fetchProfileAndLogs(forceProfileRefresh: true)
+        fetchUserReposts()
+        
+        let uid = userId ?? Auth.auth().currentUser?.uid
+        if let uid = uid {
+            viewModel.loadFollowCounts(for: uid)
+        }
+        
+        if let targetUserId = userId, !isCurrentUser {
+            viewModel.checkIfFollowing(userId: targetUserId)
+            // Verify block status against authoritative source to handle stale blockedBy data
+            verifyBlockStatus(for: targetUserId)
         }
     }
     
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                // Move buttons up to align with existing blue "More" button
-                HStack {
-                    // Back button in top left (only for non-current users)
-                    if !isCurrentUser {
-                        Button(action: { dismiss() }) {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.primary)
-                                .padding(8)
-                        }
-                        .accessibilityLabel("Back")
-                    }
-                    
-                    Spacer()
-                    
-                    // Settings button in top right
-                    if isCurrentUser {
-                        Button(action: { showingSettings = true }) {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 18))
-                                .foregroundColor(.primary)
-                        }
-                        .accessibilityLabel("Settings")
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                
-                if isCurrentUser {
-                    // Tabs for current user - moved up to use extra space
-                    Picker("Section", selection: $selectedTab) {
-                        ForEach(ProfileTab.allCases) { tab in
-                            Text(tab.rawValue).tag(tab)
-                        }
-                    }
-                    .pickerStyle(SegmentedPickerStyle())
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
-                    
-                    // Tab Content
-                    Group {
-                        switch selectedTab {
-                        case .overview:
-                            overviewTab
-                        case .diary:
-                            diaryTab
-                                .onAppear {
-                                    // Refresh logs when diary tab is viewed
-                                    if logs.isEmpty {
-                                        fetchProfileAndLogs()
-                                    }
-                                }
-                        case .lists:
-                            listsTab
-                        case .listenLater:
-                            listenLaterTab
-                        }
-                    }
+            Group {
+            if profile == nil && isLoading {
+                    loadingView
+            } else if let errorMessage = errorMessage {
+                    errorView(errorMessage)
+                } else if let profile = profile {
+                    profileOrBlockedView(for: profile)
                 } else {
-                    // Only show overview for other users, no tab bar
-                    overviewTab
+                    fallbackView
                 }
-                Spacer()
+                }
             }
-            .navigationBarHidden(true)
+            .refreshable {
+                await refreshProfile()
+            }
             .onAppear {
+            // Move all state modifications to Task to prevent "Modifying state during view update"
+            Task { @MainActor in
+                // Reset verified block status for fresh check
+                verifiedBlockedByUser = nil
+                
+                // DISABLED: Prefetch was causing EXC_BAD_ACCESS crashes
+                // The prefetched profile data appears to be corrupted or incompletely initialized
+                // Always fetch fresh from Firestore instead
+                // if let prefetchedProfile = prefetchedProfile, profile == nil {
+                //     print("✅ Using prefetched profile for user: \(prefetchedProfile.displayName)")
+                //     profile = prefetchedProfile
+                // }
+            
+                // Always fetch fresh data
                 fetchProfileAndLogs()
                 fetchUserReposts()
-                // Initialize Listen Later service early
-                listenLaterService.loadAllSections()
                 
-                // Listen for Listen Later updates
-                NotificationCenter.default.addObserver(
-                    forName: NSNotification.Name("ListenLaterItemAdded"),
-                    object: nil,
-                    queue: .main
-                ) { _ in
-                    print("🔔 Received Listen Later item added notification")
+                // Load follower/following counts from subcollections
+                let uid = userId ?? Auth.auth().currentUser?.uid
+                if let uid = uid {
+                    viewModel.loadFollowCounts(for: uid)
+                }
+                
+                // Check follow status if viewing another user's profile
+                if let targetUserId = userId, !isCurrentUser {
+                    viewModel.checkIfFollowing(userId: targetUserId)
+                    // Verify block status against authoritative source to handle stale blockedBy data
+                    verifyBlockStatus(for: targetUserId)
+                }
+                
+                // Initialize Listen Later service early
                     listenLaterService.refreshAllSections()
-                }
             }
-            .sheet(item: $selectedLog, onDismiss: { selectedLog = nil }) { log in
-                LogDetailView(log: log, onEdit: {
-                    if isCurrentUser {
-                        logToEdit = log
-                    }
-                })
-            }
-            .sheet(item: $selectedConversation, onDismiss: { selectedConversation = nil }) { convo in
-                ConversationView(conversation: convo, onDismiss: {
-                    selectedConversation = nil
-                })
-            }
-                .sheet(item: $logToEdit) { log in
-            EditLogView(log: log) {
-                            // Refresh logs after editing
-                            fetchProfileAndLogs()
-                        }
                 }
-        .sheet(isPresented: $showGenreCorrection, onDismiss: { logToCorrectGenre = nil }) {
-            if let log = logToCorrectGenre {
-                GenreCorrectionView(log: log) {
-                    // Refresh logs after genre correction
-                    fetchProfileAndLogs()
-                }
+        .fullScreenCover(item: $selectedMusicItem) { musicItem in
+            MusicProfileView(musicItem: musicItem, pinnedLog: selectedPinnedLog)
+        }
+        .fullScreenCover(isPresented: $showArtistProfile) {
+            if let artistName = selectedArtistName {
+                ArtistProfileView(artistName: artistName)
+                    .environmentObject(NavigationCoordinator())
             }
         }
         .sheet(item: Binding<GenreDetailItem?>(
             get: { selectedGenreForDetail.map { GenreDetailItem(genre: $0) } },
             set: { selectedGenreForDetail = $0?.genre }
         )) { item in
-            GenreDetailView(genre: item.genre, userLogs: logs)
+            GenreDetailView(
+                genre: item.genre,
+                userLogs: logsForGenre(item.genre),
+                isPrefiltered: true
+            )
+        }
+        .fullScreenCover(item: $selectedStatCategory) { category in
+            StatDetailListView(
+                category: category,
+                logs: logs,
+                userLists: userLists,
+                listCoverImages: listCoverImages,
+                userReposts: userReposts,
+                repostedLogs: repostedLogs,
+                profile: profile
+            )
+        }
+        .fullScreenCover(item: $selectedRatingBucket) { bucket in
+            let bucketLogs = logsForBucket(bucket, in: logs)
+            ProfileRatingBucketDetailView(
+                bucket: bucket,
+                logs: bucketLogs,
+                subtitle: "\(bucketLogs.count) \(bucketLogs.count == 1 ? "log" : "logs")",
+                isCurrentUser: isCurrentUser,
+                onLogTap: { log in
+                    navigateToMusicProfile(log: log)
+                },
+                onEdit: isCurrentUser ? { log in
+                    logToEdit = log
+                } : nil,
+                onDelete: isCurrentUser ? { log in
+                    logToDelete = log
+                    showDeleteConfirmation = true
+                } : nil,
+                onCorrectGenre: isCurrentUser ? { log in
+                    logToCorrectGenre = log
+                    showGenreCorrection = true
+                } : nil
+            )
+        }
+        .fullScreenCover(item: $selectedList) { list in
+            ListDetailView(
+                list: list,
+                onEdit: {
+                    pendingEditList = list
+                    selectedList = nil
+                },
+                onDelete: {
+                    deleteList(list)
+                }
+            )
+        }
+        .onChange(of: selectedList) { _, _ in
+            if selectedList == nil, let toEdit = pendingEditList {
+                listToEdit = toEdit
+                showEditListSheet = true
+                pendingEditList = nil
             }
-            .fullScreenCover(isPresented: $showingLogMusicView, onDismiss: { showingLogMusicView = false }) {
-                DiaryMainSearchView()
-                    .onDisappear {
-                        // Refresh logs after adding new log
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            fetchProfileAndLogs()
-                        }
-                    }
+        }
+        .fullScreenCover(isPresented: $showEditListSheet) {
+            if let list = listToEdit {
+                EditListView(list: list, onListUpdated: {
+                    fetchLists()
+                })
             }
+        }
+        .fullScreenCover(isPresented: $showFollowersList) {
+            if let profile = profile {
+                FollowersFollowingListView(userId: profile.uid, listType: .followers)
+            }
+        }
+        .fullScreenCover(isPresented: $showFollowingList) {
+            if let profile = profile {
+                FollowersFollowingListView(userId: profile.uid, listType: .following)
+            }
+        }
+        .alert("Error", isPresented: $showAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(alertMessage)
+        }
         .alert("Delete Log", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
                 logToDelete = nil
@@ -479,57 +576,30 @@ struct UserProfileView: View {
             }
         } message: {
             Text("Are you sure you want to delete this log? This action cannot be undone.")
-            }
-            .sheet(isPresented: $showCreateListSheet) {
-                CreateListView(onListCreated: {
-                    fetchLists()
-                })
-            }
         }
-        .fullScreenCover(item: $selectedMusicItem) { musicItem in
-            MusicProfileView(musicItem: musicItem, pinnedLog: selectedPinnedLog)
-        }
-        .fullScreenCover(isPresented: $showArtistProfile) {
-            if let artistName = selectedArtistName {
-                ArtistProfileView(artistName: artistName)
-                    .environmentObject(NavigationCoordinator())
+        .sheet(isPresented: $showGenreCorrection, onDismiss: { logToCorrectGenre = nil }) {
+            if let log = logToCorrectGenre {
+                GenreCorrectionView(log: log) {
+                    fetchProfileAndLogs()
+                }
             }
         }
-        .sheet(isPresented: $showDiaryLogDetail) {
-            if let log = selectedDiaryLogDetail {
-                NavigationView { EnhancedReviewView(log: log, showFullDetails: true).padding() }
-            }
-        }
-        .sheet(item: $selectedStatCategory) { category in
-            StatDetailListView(
-                category: category,
-                logs: logs,
-                userLists: userLists,
-                userReposts: userReposts,
-                profile: profile
-            )
+        .fullScreenCover(isPresented: $showingLogMusicView, onDismiss: {
+            // Refresh diary after logging new music
+            fetchProfileAndLogs()
+        }) {
+            DiaryMainSearchView()
         }
         .sheet(isPresented: $showEditProfile) {
             EditProfileView(userProfileVM: viewModel)
                 .environmentObject(nowPlayingManager)
-        }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-        }
-        .sheet(isPresented: $showAddToListenLaterSheet) {
-            AddToListenLaterView(
-                selectedSection: selectedListenLaterSection,
-                listenLaterService: ListenLaterService.shared
-            )
         }
         .sheet(isPresented: $showEditPinnedSongs) {
             EditPinnedItemsView(
                 title: "Edit Pinned Songs",
                 currentItems: profile?.pinnedSongs ?? [],
                 itemType: .song,
-                onSave: { updatedItems in
-                    updatePinnedSongs(updatedItems)
-                }
+                onSave: { updatePinnedSongs($0) }
             )
         }
         .sheet(isPresented: $showEditPinnedArtists) {
@@ -537,9 +607,7 @@ struct UserProfileView: View {
                 title: "Edit Pinned Artists",
                 currentItems: profile?.pinnedArtists ?? [],
                 itemType: .artist,
-                onSave: { updatedItems in
-                    updatePinnedArtists(updatedItems)
-                }
+                onSave: { updatePinnedArtists($0) }
             )
         }
         .sheet(isPresented: $showEditPinnedAlbums) {
@@ -547,40 +615,164 @@ struct UserProfileView: View {
                 title: "Edit Pinned Albums",
                 currentItems: profile?.pinnedAlbums ?? [],
                 itemType: .album,
-                onSave: { updatedItems in
-                    updatePinnedAlbums(updatedItems)
-                }
+                onSave: { updatePinnedAlbums($0) }
             )
         }
-        .sheet(isPresented: $showEditPinnedLists) {
-            EditPinnedListsView(
-                title: "Edit Pinned Lists",
-                currentLists: (profile?.pinnedLists ?? []).map { item in
-                    PinnedList(
-                        id: item.id,
-                        name: item.title,
-                        description: nil,
-                        coverImageUrl: item.artworkURL
-                    )
-                },
-                onSave: { updatedLists in
-                    let updatedItems = updatedLists.map { list in
-                        PinnedItem(
-                            id: list.id,
-                            title: list.name,
-                            artistName: "",
-                            albumName: nil,
-                            artworkURL: list.coverImageUrl,
-                            itemType: "list"
-                        )
+        .fullScreenCover(isPresented: $showingSettings) {
+            SettingsView()
+                .environmentObject(adminState)
+        }
+        .fullScreenCover(item: $selectedConversation, onDismiss: { selectedConversation = nil }) { convo in
+            ConversationView(
+                conversation: convo,
+                onDismiss: { selectedConversation = nil },
+                initialDisplayName: profile?.displayName,
+                initialProfilePictureUrl: profile?.profilePictureUrl ?? profile?.profileHeaderUrl
+            )
+        }
+        .sheet(isPresented: $showBlockedUsers) {
+            NavigationView {
+                BlockedUsersView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Done") { showBlockedUsers = false }
+                        }
                     }
-                    updatePinnedLists(updatedItems)
+            }
+        }
+        .sheet(isPresented: $showReportsAdmin) {
+            AdminReportsView()
+        }
+        .sheet(isPresented: $showReportSheet) {
+            if let targetId = userId, let username = profile?.username {
+                ReportContentView(
+                    contentId: targetId,
+                    contentType: .userBio,
+                    reportedUserId: targetId,
+                    reportedUsername: username,
+                    contentPreview: profile?.bio
+                )
+            }
+        }
+        .sheet(isPresented: $showBlockSheet) {
+            if let targetId = userId, let username = profile?.username {
+                BlockUserView(
+                    userId: targetId,
+                    username: username,
+                    profilePictureUrl: profile?.profilePictureUrl
+                )
+            }
+        }
+        .fullScreenCover(isPresented: $showAddToListenLaterSheet) {
+            ComprehensiveSearchView(
+                listenLaterSelectionMode: true,
+                onListenLaterItemsSelected: { items in
+                    Task {
+                        for item in items {
+                            let type: ListenLaterItemType
+                            switch item.itemType {
+                            case "song": type = .song
+                            case "album": type = .album
+                            case "artist": type = .artist
+                            default: continue
+                            }
+                            _ = await ListenLaterService.shared.addItem(item, type: type)
+                        }
+                        await MainActor.run {
+                            listenLaterService.refreshAllSections()
+                        }
+                    }
                 }
             )
         }
-
-
     }
+    
+    // MARK: - Profile Content View (Main Content)
+    private var profileContentView: some View {
+        VStack(spacing: 0) {
+            // Show tabs only for current user AND when showing full profile
+            if isCurrentUser && showFullProfile {
+                        // Custom tabs matching Social Feed design - moved to top, tightened spacing
+                    HStack(spacing: 0) {
+                        ForEach(ProfileTab.allCases) { tab in
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    selectedTab = tab
+                                }
+                            }) {
+                                    VStack(spacing: 2) {
+                                    Text(tab.rawValue)
+                                        .font(.subheadline)
+                                        .fontWeight(selectedTab == tab ? .bold : .regular)
+                                        .foregroundColor(selectedTab == tab ? .primary : .secondary)
+                                            .padding(.vertical, 8)
+                                        .frame(maxWidth: .infinity)
+                                    
+                                    // Bottom indicator line
+                                    if selectedTab == tab {
+                                        Rectangle()
+                                            .fill(Color.purple)
+                                            .frame(height: 3)
+                                    } else {
+                                        Rectangle()
+                                            .fill(Color.clear)
+                                            .frame(height: 3)
+                                    }
+                                }
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .background(selectedTab == tab ? Color.purple.opacity(0.12) : Color.clear)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                        .padding(.bottom, 4)
+                    
+                    // Tab Content - Lazy loaded to prevent memory crashes
+                    ZStack {
+                        if selectedTab == .overview {
+                            LazyView(overviewTab)
+                                .transition(.opacity)
+                        } else if selectedTab == .diary {
+                            LazyView(diaryTab)
+                                .transition(.opacity)
+                        } else if selectedTab == .lists {
+                            LazyView(listsTab)
+                                .transition(.opacity)
+                        } else if selectedTab == .listenLater {
+                            LazyView(listenLaterTab)
+                                .transition(.opacity)
+                        }
+                    }
+                } else {
+                    // Only show overview for other users OR when not showing full profile
+                    overviewTab
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .navigationBarHidden(true)
+            .overlay(alignment: .topTrailing) {
+                // Show close button for non-current users, or anytime we're in a compact/embedded profile experience
+                if !isCurrentUser || showDismissButton || !showFullProfile {
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary)
+                            .background(
+                                Circle()
+                                    .fill(.ultraThinMaterial)
+                                    .frame(width: 32, height: 32)
+                            )
+                    }
+                    .padding(.top, 8)
+                    .padding(.trailing, 16)
+                }
+            }
+    }
+    
+    // MARK: - Diary Tab Content
 
     private struct DiaryLogCard: View {
         let log: MusicLog
@@ -590,13 +782,28 @@ struct UserProfileView: View {
         let onCorrectGenre: (() -> Void)?
         let isCurrentUser: Bool
         @State private var userProfile: UserProfile? = nil
+        @State private var showingComments = false
+        @State private var isPressed = false
+        
+        // Engagement state
+        @State private var isLiked: Bool = false
+        @State private var likeCount: Int = 0
+        @State private var hasThumbsDown: Bool = false
+        @State private var hasReposted: Bool = false
+        @State private var repostCount: Int = 0
+        @State private var showActivity = false
+        
+        // Artist artwork fallback
+        @State private var fetchedArtworkURL: String? = nil
+        @State private var hasAttemptedFetch = false
         
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 14) {
-                    // Album artwork
+                    // Album/Artist artwork
                     Group {
-                        if let artwork = log.artworkUrl, let url = URL(string: artwork) {
+                        let artworkURL = fetchedArtworkURL ?? log.artworkUrl
+                        if let artwork = artworkURL, let url = URL(string: artwork) {
                             CachedAsyncImage(url: url) { image in 
                                 image.resizable().scaledToFill() 
                             } placeholder: { 
@@ -604,10 +811,15 @@ struct UserProfileView: View {
                             }
                         } else {
                             RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.3))
+                                .overlay(
+                                    Image(systemName: log.itemType == "artist" ? "person.wave.2" : "music.note")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                )
                         }
                     }
                     .frame(width: 64, height: 64)
-                    .cornerRadius(10)
+                    .cornerRadius(log.itemType == "artist" ? 32 : 10)
                     
                     VStack(alignment: .leading, spacing: 6) {
                         // Title and artist
@@ -643,13 +855,11 @@ struct UserProfileView: View {
                                 .foregroundColor(.secondary)
                             
                             if let rating = log.rating {
-                                HStack(spacing: 2) {
-                                    ForEach(1...5, id: \.self) { s in
-                                        Image(systemName: s <= rating ? "star.fill" : "star")
-                                            .foregroundColor(s <= rating ? .yellow : .gray)
-                                            .font(.caption2)
-                                    }
-                                }
+                                StarRatingDisplayView(
+                                    rating: rating,
+                                    starSize: 10,
+                                    spacing: 1
+                                )
                             }
                             
                             if log.isPublic == false {
@@ -676,48 +886,109 @@ struct UserProfileView: View {
                 
                 // Review text
                 if let review = log.review, !review.isEmpty {
-                    Text(review)
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                        .lineLimit(3)
-                        .padding(.horizontal, 2)
+                    InteractiveMentionText(
+                        review,
+                        font: .caption,
+                        color: .primary,
+                        mentionColor: .purple
+                    )
+                    .lineLimit(3)
+                    .padding(.horizontal, 2)
                 }
                 
-                // Engagement bar (simplified)
+                // Engagement bar
                 HStack(spacing: 16) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "heart")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        Text("0")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                    // Like button
+                    Button(action: { 
+                        if isLiked {
+                            LogEngagementHaptics.unlike()
+                        } else {
+                            LogEngagementHaptics.like()
+                        }
+                        toggleLike() 
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: isLiked ? "heart.fill" : "heart")
+                            Text("\(likeCount)")
+                        }
                     }
+                    .foregroundColor(isLiked ? .red : .secondary)
+                    .buttonStyle(PlainButtonStyle())
                     
-                    HStack(spacing: 4) {
-                        Image(systemName: "message")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        Text("0")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                    // Comment button
+                    Button(action: { 
+                        LogEngagementHaptics.comment()
+                        showingComments = true 
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bubble.left")
+                            Text("\(log.commentCount ?? 0)")
+                        }
                     }
+                    .foregroundColor(.secondary)
+                    .buttonStyle(PlainButtonStyle())
                     
-                    HStack(spacing: 4) {
-                        Image(systemName: "hand.thumbsdown")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        Text("0")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                    // Thumbs down button
+                    Button(action: { 
+                        LogEngagementHaptics.thumbsDown()
+                        toggleThumbsDown() 
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: hasThumbsDown ? "hand.thumbsdown.fill" : "hand.thumbsdown")
+                            if hasThumbsDown {
+                                Text("1")
+                            }
+                        }
                     }
+                    .foregroundColor(.secondary)
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    // Repost button
+                    Button(action: { 
+                        if hasReposted {
+                            LogEngagementHaptics.unrepost()
+                        } else {
+                            LogEngagementHaptics.repost()
+                        }
+                        handleRepost() 
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.2.squarepath")
+                                .foregroundColor(hasReposted ? .green : .secondary)
+                            if repostCount > 0 {
+                                Text("\(repostCount)")
+                            }
+                        }
+                    }
+                    .foregroundColor(.secondary)
+                    .buttonStyle(PlainButtonStyle())
                     
                     Spacer()
+                    
+                    // View Activity button
+                    Button(action: { 
+                        LogEngagementHaptics.viewActivity()
+                        showActivity = true 
+                    }) {
+                        Text("View Activity")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.purple)
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
+                .font(.caption)
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(.secondarySystemBackground)))
+            .scaleEffect(isPressed ? 0.98 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
             .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isPressed = true }
+                    .onEnded { _ in isPressed = false }
+            )
             .onTapGesture {
                 onTap()
             }
@@ -746,6 +1017,21 @@ struct UserProfileView: View {
                 if userProfile == nil {
                     Task { await fetchUser() }
                 }
+                loadEngagement()
+                
+                // Fetch artist artwork if missing
+                if log.itemType == "artist" && log.artworkUrl == nil && !hasAttemptedFetch {
+                    hasAttemptedFetch = true
+                    Task {
+                        await fetchArtistArtwork()
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $showingComments) {
+                UnifiedLogCommentsView(log: log)
+            }
+            .fullScreenCover(isPresented: $showActivity) {
+                LogActivityView(logId: log.id, log: log)
             }
         }
         
@@ -756,6 +1042,193 @@ struct UserProfileView: View {
                     await MainActor.run { self.userProfile = profile }
                 }
             } catch { }
+        }
+        
+        private func loadEngagement() {
+            guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+            
+            likeCount = log.likeCount ?? 0
+            repostCount = log.repostCount ?? 0
+            
+            Task {
+                let engagement = await LogEngagementCache.shared.getEngagement(logId: log.id, userId: currentUserId)
+                await MainActor.run {
+                    isLiked = engagement.isLiked
+                    hasThumbsDown = engagement.hasThumbsDown
+                    hasReposted = engagement.hasReposted
+                }
+            }
+        }
+        
+        private func fetchArtistArtwork() async {
+            guard log.itemType == "artist" else { return }
+            
+            do {
+                // Search for the artist using MusicKit
+                var request = MusicCatalogSearchRequest(term: log.artistName, types: [MusicKit.Artist.self])
+                request.limit = 5
+                
+                let response = try await request.response()
+                
+                // Find the best matching artist
+                let artist = response.artists.first { artist in
+                    artist.name.lowercased() == log.artistName.lowercased()
+                } ?? response.artists.first
+                
+                if let artist = artist, let artworkURL = artist.artwork?.url(width: 512, height: 512)?.absoluteString {
+                    await MainActor.run {
+                        fetchedArtworkURL = artworkURL
+                    }
+                    print("✅ Fetched artist artwork for log card: \(log.artistName)")
+                } else {
+                    print("⚠️ No artwork found for artist in log card: \(log.artistName)")
+                }
+            } catch {
+                print("❌ Error fetching artist artwork for log card: \(error.localizedDescription)")
+            }
+        }
+        
+        private func toggleLike() {
+            guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+            
+            Task {
+                let db = Firestore.firestore()
+                let likeRef = db.collection("logs").document(log.id).collection("likes").document(currentUserId)
+                
+                do {
+                    if isLiked {
+                        try await likeRef.delete()
+                        try await db.collection("logs").document(log.id).updateData([
+                            "likeCount": FieldValue.increment(Int64(-1))
+                        ])
+                        
+                        await MainActor.run {
+                            isLiked = false
+                            likeCount -= 1
+                            LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: false)
+                        }
+                    } else {
+                        try await likeRef.setData([
+                            "userId": currentUserId,
+                            "timestamp": FieldValue.serverTimestamp()
+                        ])
+                        try await db.collection("logs").document(log.id).updateData([
+                            "likeCount": FieldValue.increment(Int64(1))
+                        ])
+                        
+                        // Create like notification
+                        await NotificationService.shared.createLikeNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
+                        
+                        await MainActor.run {
+                            isLiked = true
+                            likeCount += 1
+                            LogEngagementCache.shared.updateEngagement(logId: log.id, isLiked: true)
+                        }
+                    }
+                } catch {
+                    print("❌ Error toggling like: \(error)")
+                }
+            }
+        }
+        
+        private func toggleThumbsDown() {
+            guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+            
+            Task {
+                let db = Firestore.firestore()
+                let thumbsDownRef = db.collection("logs").document(log.id).collection("thumbsDown").document(currentUserId)
+                
+                do {
+                    if hasThumbsDown {
+                        try await thumbsDownRef.delete()
+                        
+                        // ✅ Decrement the thumbs down count
+                        try await db.collection("logs").document(log.id).updateData([
+                            "thumbsDownCount": FieldValue.increment(Int64(-1))
+                        ])
+                        
+                        await MainActor.run {
+                            hasThumbsDown = false
+                            LogEngagementCache.shared.updateEngagement(logId: log.id, hasThumbsDown: false)
+                        }
+                    } else {
+                        try await thumbsDownRef.setData([
+                            "userId": currentUserId,
+                            "timestamp": FieldValue.serverTimestamp()
+                        ])
+                        
+                        // ✅ Increment the thumbs down count
+                        try await db.collection("logs").document(log.id).updateData([
+                            "thumbsDownCount": FieldValue.increment(Int64(1))
+                        ])
+                        
+                        // Create dislike notification
+                        await NotificationService.shared.createDislikeNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
+                        
+                        await MainActor.run {
+                            hasThumbsDown = true
+                            LogEngagementCache.shared.updateEngagement(logId: log.id, hasThumbsDown: true)
+                        }
+                    }
+                } catch {
+                    print("❌ Error toggling thumbs down: \(error)")
+                }
+            }
+        }
+        
+        private func handleRepost() {
+            guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+            
+            Task {
+                let db = Firestore.firestore()
+                let repostRef = db.collection("logs").document(log.id).collection("reposts").document(currentUserId)
+                
+                do {
+                    if hasReposted {
+                        try await repostRef.delete()
+                        try await db.collection("logs").document(log.id).updateData([
+                            "repostCount": FieldValue.increment(Int64(-1))
+                        ])
+                        
+                        await MainActor.run {
+                            hasReposted = false
+                            repostCount = max(0, repostCount - 1)
+                            LogEngagementCache.shared.updateEngagement(logId: log.id, hasReposted: false)
+                        }
+                    } else {
+                        try await repostRef.setData([
+                            "userId": currentUserId,
+                            "timestamp": FieldValue.serverTimestamp()
+                        ])
+                        try await db.collection("logs").document(log.id).updateData([
+                            "repostCount": FieldValue.increment(Int64(1))
+                        ])
+                        
+                        // Create repost notification
+                        await NotificationService.shared.createRepostNotification(
+                            logId: log.id,
+                            logOwnerId: log.userId,
+                            log: log
+                        )
+                        
+                        await MainActor.run {
+                            hasReposted = true
+                            repostCount += 1
+                            LogEngagementCache.shared.updateEngagement(logId: log.id, hasReposted: true)
+                        }
+                    }
+                } catch {
+                    print("❌ Error toggling repost: \(error)")
+                }
+            }
         }
     }
     
@@ -841,6 +1314,133 @@ struct UserProfileView: View {
     
 
     
+    private struct ListCard: View {
+        let list: MusicList
+        
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 12) {
+                    ZStack {
+                        if let url = list.coverImageUrl.flatMap(URL.init(string:)) {
+                            CachedAsyncImage(url: url) { image in 
+                                image.resizable().scaledToFill() 
+                            } placeholder: { 
+                                Color(.systemGray6) 
+                            }
+                            .frame(width: 64, height: 64)
+                            .cornerRadius(12)
+                        } else if !list.items.isEmpty {
+                            // Try to show artwork from first item if no cover image
+                            if let decoded = decodeListItem(from: list.items[0]),
+                               let artworkUrl = decoded.artworkURL,
+                               let url = URL(string: artworkUrl) {
+                                CachedAsyncImage(url: url) { image in 
+                                    image.resizable().scaledToFill() 
+                                } placeholder: { 
+                                    Color(.systemGray6) 
+                                }
+                                .frame(width: 64, height: 64)
+                                .cornerRadius(12)
+                            } else {
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color(.systemGray6))
+                                    .frame(width: 64, height: 64)
+                                    .overlay(
+                                        Image(systemName: "music.note.list")
+                                            .font(.system(size: 28))
+                                            .foregroundColor(.purple)
+                                    )
+                            }
+                        } else {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color(.systemGray6))
+                                .frame(width: 64, height: 64)
+                                .overlay(
+                                    Image(systemName: "music.note.list")
+                                        .font(.system(size: 28))
+                                        .foregroundColor(.purple)
+                                )
+                        }
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(list.title)
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        
+                        if let desc = list.description, !desc.isEmpty {
+                            Text(desc)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                        
+                        HStack(spacing: 8) {
+                            Text("\(list.items.count) item\(list.items.count == 1 ? "" : "s")")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            LikeButton(
+                                itemId: list.id,
+                                itemType: .list,
+                                itemTitle: list.title,
+                                itemArtist: nil,
+                                itemArtworkUrl: list.coverImageUrl,
+                                showCount: true
+                            )
+                        }
+                    }
+                }
+                
+                // Preview thumbnails
+                if !list.items.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                            let previewItems = Array(list.items.prefix(6))
+                            ForEach(previewItems, id: \.self) { rawItem in
+                                if let decoded = decodeListItem(from: rawItem),
+                                   let artworkUrl = decoded.artworkURL,
+                               let url = URL(string: artworkUrl) {
+                                CachedAsyncImage(url: url) { image in
+                                    image.resizable().scaledToFill()
+                                } placeholder: {
+                                        Color(.systemGray6)
+                                }
+                                    .frame(width: 44, height: 44)
+                                    .cornerRadius(8)
+                            } else {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(Color(.systemGray6))
+                                        .frame(width: 44, height: 44)
+                                    .overlay(
+                                        Image(systemName: "music.note")
+                                                .font(.system(size: 18))
+                                            .foregroundColor(.purple)
+                                    )
+                            }
+                        }
+                        }
+                        .padding(.trailing, 8)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(.secondarySystemBackground))
+            )
+        }
+        
+        private func decodeListItem(from raw: String) -> MusicSearchResult? {
+            guard let data = raw.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(MusicSearchResult.self, from: data)
+        }
+    }
+
     private struct DiaryGridCard: View {
         let log: MusicLog
         let onTap: () -> Void
@@ -896,13 +1496,7 @@ struct UserProfileView: View {
                     
                     // Rating stars
                     if let rating = log.rating {
-                        HStack(spacing: 1) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= rating ? "star.fill" : "star")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(star <= rating ? .yellow : .gray)
-                            }
-                        }
+                        StarRatingDisplayView(rating: rating, starSize: 8, spacing: 1, showNumber: true)
                     }
                 }
             }
@@ -990,119 +1584,179 @@ struct UserProfileView: View {
     }
     
     private var diaryTab: some View {
-        ZStack(alignment: .bottomTrailing) {
-            VStack(spacing: 0) {
-                // Toggle Controls
-                if !logs.isEmpty {
-                    DiaryToggleControls(
-                        viewFormat: $diaryViewFormat,
-                        sortOption: $diarySortOption
-                    )
-                    .padding(.horizontal)
-                    .padding(.bottom, 16)
-                    
-
-                }
+        GeometryReader { geometry in
+            ZStack(alignment: .bottomTrailing) {
+                diaryTabContent
                 
-                if isLoading {
-                    ProgressView().padding()
-                }
-                if let error = errorMessage {
-                    Text(error).foregroundColor(.red).padding()
-                }
-                if logs.isEmpty && !isLoading {
-                    VStack(spacing: 16) {
-                        Image(systemName: "music.note")
-                            .font(.system(size: 40))
-                            .foregroundColor(.gray)
-                        Text("No music logs yet.")
-                            .font(.headline)
-                            .foregroundColor(.secondary)
-                        if isCurrentUser {
-                            Button("Log Your First Song") {
-                                showingLogMusicView = true
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.purple)
-                        }
+                // Floating Action Button
+                if isCurrentUser && !isLoading {
+                    Button(action: { showingLogMusicView = true }) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding()
+                            .background(Circle().fill(Color.purple).shadow(radius: 4))
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding()
-                } else {
-                            ScrollView {
-                        if diaryViewFormat == .list {
-                            LazyVStack(spacing: 12) {
-                                ForEach(sortedAndFilteredLogs) { log in
-                                                                        DiaryLogCard(
-                                        log: log, 
-                                        onTap: {
-                                        navigateToMusicProfile(log: log)
-                                        },
-                                        onEdit: isCurrentUser ? {
-                                            logToEdit = log
-                                        } : nil,
-                                        onDelete: isCurrentUser ? {
-                                            logToDelete = log
-                                            showDeleteConfirmation = true
-                                        } : nil,
-                                        onCorrectGenre: isCurrentUser ? {
-                                            logToCorrectGenre = log
-                                            showGenreCorrection = true
-                                        } : nil,
-                                        isCurrentUser: isCurrentUser
-                                    )
-                                }
-                            }
-                            .padding(.horizontal)
-                        } else {
-                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 12) {
-                                ForEach(sortedAndFilteredLogs) { log in
-                                                                        DiaryGridCard(
-                                        log: log, 
-                                        onTap: {
-                                        navigateToMusicProfile(log: log)
-                                        },
-                                        onEdit: isCurrentUser ? {
-                                            logToEdit = log
-                                        } : nil,
-                                        onDelete: isCurrentUser ? {
-                                            logToDelete = log
-                                            showDeleteConfirmation = true
-                                        } : nil,
-                                        onCorrectGenre: isCurrentUser ? {
-                                            logToCorrectGenre = log
-                                            showGenreCorrection = true
-                                        } : nil,
-                                        isCurrentUser: isCurrentUser
-                                    )
-                                }
-                            }
-                            .padding(.horizontal)
-                        }
-                    }
-                    .refreshable { fetchProfileAndLogs() }
+                    .padding([.trailing, .bottom], 24)
+                    .accessibilityLabel("Log new music")
                 }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+    }
+    
+    // Separate computed property to reduce complexity and prevent memory issues
+    private var diaryTabContent: some View {
+        VStack(spacing: 0) {
+            // Toggle Controls
+            if !logs.isEmpty {
+                DiaryToggleControls(
+                    viewFormat: $diaryViewFormat,
+                    sortOption: $diarySortOption
+                )
+                .padding(.horizontal)
+                .padding(.bottom, 16)
+            }
             
-            // Floating Action Button
-            if isCurrentUser && !isLoading {
-                Button(action: { showingLogMusicView = true }) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Circle().fill(Color.purple).shadow(radius: 4))
-                }
-                .padding([.trailing, .bottom], 24)
-                .accessibilityLabel("Log new music")
+            if isLoading {
+                ProgressView().padding()
+            } else if let error = errorMessage {
+                Text(error).foregroundColor(.red).padding()
+            } else if logs.isEmpty {
+                emptyDiaryState
+            } else {
+                diaryScrollContent
             }
         }
     }
+    
+    // Empty state view
+    private var emptyDiaryState: some View {
+        VStack(spacing: 20) {
+            // Icon
+            ZStack {
+                Circle()
+                    .fill(Color.purple.opacity(0.1))
+                    .frame(width: 100, height: 100)
+                
+                Image(systemName: "music.note.list")
+                    .font(.system(size: 48))
+                    .foregroundColor(.purple)
+            }
+            
+            // Text content
+            VStack(spacing: 8) {
+                Text("No music logs yet")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.primary)
+                
+                Text(isCurrentUser ? "Start logging the music you listen to\nand share your thoughts with friends" : "This user hasn't logged any music yet")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            
+            // CTA Button
+            if isCurrentUser {
+                Button(action: {
+                    showingLogMusicView = true
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 16))
+                        Text("Log Your First Song")
+                            .fontWeight(.semibold)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(
+                        Capsule()
+                            .fill(Color.purple)
+                    )
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+    
+    // Scroll content view
+    private var diaryScrollContent: some View {
+        ScrollView {
+            if diaryViewFormat == .list {
+                diaryListView
+            } else {
+                diaryGridView
+            }
+        }
+        .refreshable { 
+            fetchProfileAndLogs()
+        }
+    }
+    
+    // List view
+    private var diaryListView: some View {
+        LazyVStack(spacing: 12) {
+            ForEach(sortedAndFilteredLogs) { log in
+                DiaryLogCard(
+                    log: log,
+                    onTap: { navigateToMusicProfile(log: log) },
+                    onEdit: isCurrentUser ? { logToEdit = log } : nil,
+                    onDelete: isCurrentUser ? {
+                        logToDelete = log
+                        showDeleteConfirmation = true
+                    } : nil,
+                    onCorrectGenre: isCurrentUser ? {
+                        logToCorrectGenre = log
+                        showGenreCorrection = true
+                    } : nil,
+                    isCurrentUser: isCurrentUser
+                )
+            }
+        }
+        .padding(.horizontal)
+    }
+    
+    // Grid view
+    private var diaryGridView: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 12) {
+            ForEach(sortedAndFilteredLogs) { log in
+                DiaryGridCard(
+                    log: log,
+                    onTap: { navigateToMusicProfile(log: log) },
+                    onEdit: isCurrentUser ? { logToEdit = log } : nil,
+                    onDelete: isCurrentUser ? {
+                        logToDelete = log
+                        showDeleteConfirmation = true
+                    } : nil,
+                    onCorrectGenre: isCurrentUser ? {
+                        logToCorrectGenre = log
+                        showGenreCorrection = true
+                    } : nil,
+                    isCurrentUser: isCurrentUser
+                )
+            }
+        }
+        .padding(.horizontal)
+    }
+    
 
     // Sorted and filtered logs
     // Sorted logs (genre filtering removed)
     private var sortedAndFilteredLogs: [MusicLog] {
-        return logs.sorted { log1, log2 in
+        // Safety guard: don't process logs while loading to prevent race conditions
+        guard !isLoading else { return [] }
+        
+        // Remove duplicates based on ID first
+        let uniqueLogs = Dictionary(grouping: logs, by: { $0.id })
+            .compactMap { $0.value.first }
+        
+        // Then sort
+        return uniqueLogs.sorted { log1, log2 in
             switch diarySortOption {
             case .mostRecent:
                 return log1.dateLogged > log2.dateLogged
@@ -1118,14 +1772,13 @@ struct UserProfileView: View {
                 }
                 return rating1 > rating2
             case .mostPopular:
-                // For now, use rating as proxy for popularity
-                // In the future, this could use actual engagement metrics
-                let rating1 = log1.rating ?? 0
-                let rating2 = log2.rating ?? 0
-                if rating1 == rating2 {
-                    return log1.dateLogged > log2.dateLogged
+                // Calculate weighted engagement score: likes×1 + comments×2 + reposts×3
+                let engagement1 = (log1.likeCount ?? 0) + ((log1.commentCount ?? 0) * 2) + ((log1.repostCount ?? 0) * 3)
+                let engagement2 = (log2.likeCount ?? 0) + ((log2.commentCount ?? 0) * 2) + ((log2.repostCount ?? 0) * 3)
+                if engagement1 == engagement2 {
+                    return log1.dateLogged > log2.dateLogged // Tie-breaker: most recent
                 }
-                return rating1 > rating2
+                return engagement1 > engagement2
             }
         }
     }
@@ -1172,19 +1825,52 @@ struct UserProfileView: View {
                 if isLoadingLists {
                     ProgressView().padding()
                 } else if userLists.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "music.note.list")
-                            .font(.system(size: 40))
-                            .foregroundColor(.gray)
-                        Text("No lists yet.")
-                            .font(.headline)
-                            .foregroundColor(.secondary)
+                    VStack(spacing: 20) {
+                        // Icon
+                        ZStack {
+                            Circle()
+                                .fill(Color.purple.opacity(0.1))
+                                .frame(width: 100, height: 100)
+                            
+                            Image(systemName: "music.note.list")
+                                .font(.system(size: 48))
+                                .foregroundColor(.purple)
+                        }
+                        
+                        // Text content
+                        VStack(spacing: 8) {
+                            Text("No lists yet")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .foregroundColor(.primary)
+                            
+                            Text(isCurrentUser ? "Create curated playlists and collections\nof your favorite music" : "This user hasn't created any lists yet")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                        }
+                        
+                        // CTA Button
                         if isCurrentUser {
-                            Button("Create Your First List") {
+                            Button(action: {
                                 showCreateListSheet = true
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 16))
+                                    Text("Create Your First List")
+                                        .fontWeight(.semibold)
+                                }
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 14)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.purple)
+                                )
+                                .foregroundColor(.white)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.purple)
+                            .buttonStyle(PlainButtonStyle())
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1193,83 +1879,20 @@ struct UserProfileView: View {
                     ScrollView {
                         LazyVStack(spacing: 16) {
                             ForEach(userLists) { list in
-                                Button(action: { selectedList = list }) {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        HStack(alignment: .center, spacing: 12) {
-                                            ZStack {
-                                                if let url = list.coverImageUrl.flatMap(URL.init(string:)) {
-                                                    CachedAsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color(.systemGray6) }
-                                                        .frame(width: 56, height: 56)
-                                                        .cornerRadius(12)
-                                                } else {
-                                                    RoundedRectangle(cornerRadius: 12)
-                                                        .fill(Color(.systemGray6))
-                                                        .frame(width: 56, height: 56)
-                                                    Image(systemName: "music.note.list")
-                                                        .font(.system(size: 28))
-                                                        .foregroundColor(.purple)
-                                                }
-                                            }
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                HStack {
-                                                VStack(alignment: .leading, spacing: 4) {
-                                                    Text(list.title)
-                                                        .font(.headline)
-                                                        .foregroundColor(.primary)
-                                                    if let desc = list.description, !desc.isEmpty {
-                                                        Text(desc)
-                                                            .font(.subheadline)
-                                                            .foregroundColor(.secondary)
-                                                            .lineLimit(1)
-                                                    }
-                                                    Text("\(list.items.count) item\(list.items.count == 1 ? "" : "s")")
-                                                        .font(.caption)
-                                                        .foregroundColor(.secondary)
-                                                    }
-                                                    Spacer()
-                                                    LikeButton(
-                                                        itemId: list.id,
-                                                        itemType: .list,
-                                                        itemTitle: list.title,
-                                                        itemArtist: nil,
-                                                        itemArtworkUrl: list.coverImageUrl,
-                                                        showCount: true
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        if !list.items.isEmpty {
-                                            HStack(spacing: 8) {
-                                                ForEach(list.items.prefix(3), id: \.self) { item in
-                                                    ZStack {
-                                                        RoundedRectangle(cornerRadius: 6)
-                                                            .fill(Color(.systemGray5))
-                                                            .frame(width: 32, height: 32)
-                                                        Text(item.prefix(2))
-                                                            .font(.caption2)
-                                                            .foregroundColor(.purple)
-                                                    }
-                                                }
-                                                if list.items.count > 3 {
-                                                    Text("+")
-                                                        .font(.caption)
-                                                        .foregroundColor(.secondary)
-                                                }
-                                            }
-                                        }
+                                ListCard(list: list)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        print("🎵 List card tapped: \(list.title) (id: \(list.id))")
+                                        selectedList = list
+                                        print("🎵 selectedList set to: \(list.title)")
                                     }
-                                    .padding()
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 16)
-                                            .fill(Color(.systemBackground))
-                                            .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
-                                    )
-                                }
-                                .buttonStyle(PlainButtonStyle())
                             }
                         }
                         .padding(.horizontal)
                         .padding(.top, 8)
+                    }
+                    .onAppear {
+                        print("🎵 Lists tab appeared with \(userLists.count) lists")
                     }
                 }
             }
@@ -1287,7 +1910,7 @@ struct UserProfileView: View {
             }
         }
         .onAppear(perform: fetchLists)
-        .sheet(item: $selectedList) { list in
+        .fullScreenCover(item: $selectedList) { list in
             ListDetailView(
                 list: list,
                 onEdit: {
@@ -1307,11 +1930,16 @@ struct UserProfileView: View {
                 pendingEditList = nil
             }
         }
-        .sheet(isPresented: $showEditListSheet) {
+        .fullScreenCover(isPresented: $showEditListSheet) {
             if let list = listToEdit {
                 EditListView(list: list, onListUpdated: {
                     fetchLists()
                 })
+            }
+        }
+        .fullScreenCover(isPresented: $showCreateListSheet) {
+            CreateListView {
+                fetchLists()
             }
         }
     }
@@ -1340,23 +1968,41 @@ struct UserProfileView: View {
                     let filtered = lists.filter { $0.userId == uid && $0.listType != "listenNext" }
                     print("[DEBUG] Regular lists matching userId: \(filtered.count)")
                     userLists = filtered
+                    
+                    let covers = filtered.reduce(into: [String: URL]()) { acc, list in
+                        if let urlString = list.coverImageUrl,
+                           !urlString.isEmpty,
+                           let url = URL(string: urlString) {
+                            acc[list.id] = url
+                        }
+                    }
+                    listCoverImages = covers
                 } else {
                     print("[DEBUG] No lists fetched or error: \(error?.localizedDescription ?? "none")")
                     userLists = []
+                    listCoverImages = [:]
                 }
             }
         }
     }
     
-    private func fetchProfileAndLogs() {
+    private func fetchProfileAndLogs(forceProfileRefresh: Bool = false) {
         let uid = userId ?? Auth.auth().currentUser?.uid
         guard let uid else {
             errorMessage = "You must be logged in to view this profile."
             return
         }
+        
+        // Skip profile fetch if we already have it from prefetch (to prevent duplicate fetches and scrolling issues)
+        let shouldFetchProfile = forceProfileRefresh || (profile == nil)
+        
+        if shouldFetchProfile {
         isLoading = true
         errorMessage = nil
-        // Fetch profile
+        }
+        
+        // Fetch profile only if needed
+        if shouldFetchProfile {
         Firestore.firestore().collection("users").document(uid).getDocument { snapshot, error in
             DispatchQueue.main.async {
                 if let error = error {
@@ -1368,11 +2014,24 @@ struct UserProfileView: View {
                     print("🎵 PINNED_ITEMS: 🔍 Raw Firestore data keys: \(Array(data.keys))")
                     print("🎵 PINNED_ITEMS: 🔍 pinnedSongs data: \(data["pinnedSongs"] ?? "nil")")
                     
-                    if let profile = try? Firestore.Decoder().decode(UserProfile.self, from: data) {
+                    // SAFETY: Try to decode with better error handling
+                    do {
+                        let profile = try Firestore.Decoder().decode(UserProfile.self, from: data)
                         print("🎵 PINNED_ITEMS: ✅ Profile fetched successfully - pinnedSongs count: \(profile.pinnedSongs?.count ?? 0)")
+                        
+                        // Relax validation: proceed even if some fields are empty; log warning only
+                        if profile.uid.isEmpty || profile.username.isEmpty {
+                            print("⚠️ Profile validation warning: empty uid/username, continuing")
+                        }
+                        
                         self.profile = profile
-                    } else {
-                        print("🎵 PINNED_ITEMS: ❌ Failed to decode profile - trying manual decode")
+                        // Use denormalized follow counts immediately if available
+                        self.viewModel.followerCount = profile.followerCount ?? self.viewModel.followerCount
+                        self.viewModel.followingCount = profile.followingCount ?? self.viewModel.followingCount
+                        self.isLoading = false
+                        self.errorMessage = nil
+                    } catch {
+                        print("🎵 PINNED_ITEMS: ❌ Decode error: \(error)")
                         // Try to create a minimal profile manually
                         if let currentUser = Auth.auth().currentUser {
                             print("🎵 PINNED_ITEMS: 🔧 Creating minimal profile for UID: \(currentUser.uid)")
@@ -1485,23 +2144,37 @@ struct UserProfileView: View {
                 } else {
                     print("🎵 PINNED_ITEMS: ❌ No data in Firestore snapshot")
                 }
+                
+                // Fetch logs after profile is loaded
+                self.fetchLogs(for: uid)
             }
-            // Fetch logs
-            MusicLog.fetchLogsForUser(userId: uid) { logs, error in
-                DispatchQueue.main.async {
+            }
+        } else {
+            // Profile already loaded from prefetch, just fetch logs
+            print("✅ [UserProfileView] Using prefetched profile, fetching logs only")
+            fetchLogs(for: uid)
+        }
+    }
+    
+    private func fetchLogs(for uid: String) {
+        Task {
+            do {
+                let logs = try await MusicLogStore.shared.fetchLogs(forUserId: uid)
+                await MainActor.run {
+                    self.logs = logs
                     self.isLoading = false
-                    if let error = error {
-                        // Don't show Firestore index errors in UI - they should be handled in Firebase console
-                        if !error.localizedDescription.contains("index") && !error.localizedDescription.contains("create_composite") {
-                            self.errorMessage = error.localizedDescription
-                        } else {
-                            print("⚠️ Firestore index needed: \(error.localizedDescription)")
-                        }
+                    self.fetchLists()
+                }
+            } catch {
+                await MainActor.run {
+                    self.isLoading = false
+                    let message = error.localizedDescription
+                    if message.contains("index") || message.contains("create_composite") {
+                        print("⚠️ Firestore index needed: \(message)")
                     } else {
-                        self.logs = logs ?? []
+                        self.errorMessage = message
                     }
-                    // Fetch lists after logs
-                    fetchLists()
+                    self.fetchLists()
                 }
             }
         }
@@ -1512,46 +2185,98 @@ struct UserProfileView: View {
     private var overviewTab: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 24) {
-                // MARK: - Profile Header Section
-                profileHeaderSection
+                // Settings button at top right, only for current user
+                if isCurrentUser && showFullProfile {
+                    HStack {
+                        Spacer()
+                        Button(action: { showingSettings = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 18))
+                                .foregroundColor(.primary)
+                        }
+                        .accessibilityLabel("Settings")
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
+                }
                 
-                // MARK: - Recent Diary Section
-                recentDiarySection
-                
-                // MARK: - Pinned Songs Section
-                pinnedSongsSection
-                
-                // MARK: - Pinned Artists Section
-                pinnedArtistsSection
-                
-                // MARK: - Pinned Albums Section
-                pinnedAlbumsSection
-                
-                // MARK: - Pinned Lists Section
-                pinnedListsSection
-                
-                // MARK: - Rating Distribution Section
-                ratingDistributionSection
-                
-                // MARK: - Genre Chart Section
-                genreChartSection
-                
-                // MARK: - Stats Section
-                statsSection
+                // Split into groups to reduce complexity and prevent crashes
+                profileAndSocialGroup
+                    .id("profile-social")
+                pinnedItemsGroup
+                    .id("pinned-items")
+                analyticsGroup
+                    .id("analytics")
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 100) // Extra padding for tab bar
         }
     }
     
-    // MARK: - Profile Header Section
-    private var profileHeaderSection: some View {
+    // MARK: - Overview Tab Groups (Uses AnyView to prevent stack overflow from deep type nesting)
+    
+    private var profileAndSocialGroup: AnyView {
+        AnyView(
+        VStack(spacing: 24) {
+                // Split into smaller sections to prevent type resolution crashes
+                profileBasicInfoSection
+                profileBioSection
+                profileSocialStatsSection
+                profileActionsSection
+            recentDiarySection
+        }
+        )
+    }
+    
+    private var pinnedItemsGroup: AnyView {
+        AnyView(
+        VStack(spacing: 20) {
+            pinnedSongsSection
+            pinnedArtistsSection
+            pinnedAlbumsSection
+        }
+        )
+    }
+    
+    private var analyticsGroup: AnyView {
+        AnyView(
+        VStack(spacing: 24) {
+            ratingDistributionSection
+            genreChartSection
+            statsSection
+        }
+        )
+    }
+    
+    // MARK: - Profile Header Sections (Split for Type Resolution)
+    
+    // Basic info: Picture, Name, Username - wrapped in AnyView to break type chain
+    private var profileBasicInfoSection: AnyView {
+        guard let profile = profile, !profile.uid.isEmpty, !profile.username.isEmpty else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
                     VStack(spacing: 20) {
-            if let profile = profile {
-                // Profile Picture with enhanced styling
-                profilePictureView(profile: profile)
+                profilePicturePlaceholder // Use simple placeholder to avoid type complexity
+                    .overlay(
+                        // Load actual image on top if available
+                        Group {
+                            if let urlString = profile.profilePictureUrl,
+                               !urlString.isEmpty,
+                               let url = URL(string: urlString) {
+                                AsyncImage(url: url) { phase in
+                                    if case .success(let image) = phase {
+                                        image
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(width: 120, height: 120)
+                                            .clipShape(Circle())
+                                    }
+                                }
+                            }
+                        }
+                    )
                 
-                // Name and Username with improved typography
                 VStack(spacing: 6) {
                             Text(profile.displayName)
                         .font(.system(size: 28, weight: .bold, design: .default))
@@ -1566,9 +2291,16 @@ struct UserProfileView: View {
                         .background(Color(.systemGray6))
                         .cornerRadius(12)
                 }
-                
-                // Bio with enhanced styling
-                if let bio = profile.bio, !bio.isEmpty {
+            }
+        )
+    }
+    
+    // Bio section - wrapped in AnyView
+    private var profileBioSection: AnyView {
+        guard let profile = profile, let bio = profile.bio, !bio.isEmpty else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
                                 Text(bio)
                         .font(.system(size: 16, weight: .regular, design: .default))
                         .foregroundColor(.primary)
@@ -1577,53 +2309,62 @@ struct UserProfileView: View {
                         .lineSpacing(2)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
+        )
                 }
                 
-                // Social Score Display
-                if let socialScore = profile.socialScore, let totalRatings = profile.totalSocialRatings, totalRatings > 0 {
-                    socialScoreSection(socialScore: socialScore, totalRatings: totalRatings, badges: profile.socialBadges ?? [])
+    // Social stats: Followers/Following - wrapped in AnyView
+    private var profileSocialStatsSection: AnyView {
+        guard let profile = profile, !profile.uid.isEmpty else {
+            return AnyView(EmptyView())
                 }
-                
-                // Enhanced Followers and Following with better visual hierarchy
+        return AnyView(
+            VStack(spacing: 12) {
+                // Followers and Following (simplified - removed social score to reduce complexity)
                 HStack(spacing: 40) {
-                    VStack(spacing: 6) {
-                        Text("\(formatNumber(profile.followers?.count ?? 0))")
-                            .font(.system(size: 24, weight: .bold, design: .default))
-                            .foregroundColor(.primary)
-                        
-                        Text("Followers")
-                            .font(.system(size: 14, weight: .medium, design: .default))
-                                            .foregroundColor(.secondary)
-                                    }
-                    .onTapGesture {
-                        // TODO: Navigate to followers list
-                        print("Navigate to followers")
+                    Button(action: { showFollowersList = true }) {
+                        VStack(spacing: 6) {
+                            Text("\(formatNumber(viewModel.followerCount))")
+                                .font(.system(size: 24, weight: .bold, design: .default))
+                                .foregroundColor(.primary)
+                            
+                            Text("Followers")
+                                .font(.system(size: 14, weight: .medium, design: .default))
+                                .foregroundColor(.secondary)
+                        }
                     }
+                    .buttonStyle(PlainButtonStyle())
                     
-                    // Divider
                     Rectangle()
                         .fill(Color(.systemGray4))
                         .frame(width: 1, height: 40)
                     
-                    VStack(spacing: 6) {
-                        Text("\(formatNumber(profile.following?.count ?? 0))")
-                            .font(.system(size: 24, weight: .bold, design: .default))
-                            .foregroundColor(.primary)
-                        
-                        Text("Following")
-                            .font(.system(size: 14, weight: .medium, design: .default))
-                                            .foregroundColor(.secondary)
+                    Button(action: { showFollowingList = true }) {
+                        VStack(spacing: 6) {
+                            Text("\(formatNumber(viewModel.followingCount))")
+                                .font(.system(size: 24, weight: .bold, design: .default))
+                                .foregroundColor(.primary)
+                            
+                            Text("Following")
+                                .font(.system(size: 14, weight: .medium, design: .default))
+                                .foregroundColor(.secondary)
+                        }
                     }
-                    .onTapGesture {
-                        // TODO: Navigate to following list
-                        print("Navigate to following")
-                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
                 .padding(.vertical, 8)
+            }
+        )
+    }
                 
-                // Enhanced Edit Profile Button or Follow/Message buttons
-                        if isCurrentUser {
-                                Button(action: { showEditProfile = true }) {
+    // Action buttons: Edit/Follow/Message/Block - wrapped in AnyView
+    private var profileActionsSection: AnyView {
+        guard let profile = profile, !profile.uid.isEmpty else {
+            return AnyView(EmptyView())
+        }
+                if isCurrentUser {
+            return AnyView(
+                VStack(spacing: 12) {
+                    Button(action: { showEditProfile = true }) {
                         HStack(spacing: 8) {
                             Image(systemName: "pencil")
                                 .font(.system(size: 14, weight: .medium))
@@ -1633,168 +2374,151 @@ struct UserProfileView: View {
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .frame(height: 44)
-                        .background(
-                            LinearGradient(
-                                colors: [Color.blue, Color.blue.opacity(0.8)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
+                        .background(Color.purple)
                         .cornerRadius(22)
-                        .shadow(color: Color.blue.opacity(0.3), radius: 8, x: 0, y: 4)
                     }
-                    .buttonStyle(BumpinPrimaryButtonStyle())
                     .padding(.horizontal, 24)
+
+                    Button(action: { showBlockedUsers = true }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "hand.raised")
+                                .font(.system(size: 14, weight: .medium))
+                            Text("Blocked Users")
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                        .foregroundColor(.purple)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(Color.purple.opacity(0.1))
+                        .cornerRadius(22)
+                    }
+                    .padding(.horizontal, 24)
+                }
+            )
                         } else {
-                    // Follow and Message buttons for other users
-                            HStack(spacing: 12) {
-                                Button(action: {
-                                    if let userId = userId {
-                                        viewModel.toggleFollow(userId: userId)
-                                    }
-                                }) {
-                            HStack(spacing: 6) {
-                                    if viewModel.isFollowActionLoading {
-                                        ProgressView()
-                                            .scaleEffect(0.8)
-                                        .tint(.white)
-                                    } else {
-                                    Image(systemName: viewModel.isFollowing ? "person.badge.minus" : "person.badge.plus")
-                                        .font(.system(size: 14, weight: .medium))
-                                        Text(viewModel.isFollowing ? "Following" : "Follow")
-                                        .font(.system(size: 16, weight: .semibold))
-                                }
-                            }
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 44)
-                            .background(
-                                viewModel.isFollowing ? 
-                                LinearGradient(colors: [Color(.systemGray3), Color(.systemGray3)], startPoint: .leading, endPoint: .trailing) :
-                                LinearGradient(colors: [Color.purple, Color.purple.opacity(0.8)], startPoint: .leading, endPoint: .trailing)
-                            )
-                            .cornerRadius(22)
-                            .shadow(color: (viewModel.isFollowing ? Color.gray : Color.purple).opacity(0.3), radius: 6, x: 0, y: 3)
-                        }
-                        .disabled(viewModel.isFollowActionLoading)
-                        .buttonStyle(BumpinPrimaryButtonStyle())
-                        
-                                Button(action: {
-                                    guard let target = userId else { return }
-                                    DirectMessageService.shared.getOrCreateConversation(with: target) { convo, _ in
-                                        if let convo = convo {
-                                            DispatchQueue.main.async { self.selectedConversation = convo }
-                                        }
-                                    }
-                                }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "message")
-                                    .font(.system(size: 14, weight: .medium))
-                                    Text("Message")
-                                    .font(.system(size: 16, weight: .semibold))
-                            }
-                                        .foregroundColor(.purple)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 44)
-                            .background(Color.purple.opacity(0.1))
-                            .cornerRadius(22)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 22)
-                                    .stroke(Color.purple.opacity(0.3), lineWidth: 1.5)
-                            )
-                        }
-                        .buttonStyle(BumpinButtonStyle())
-                    }
-                    .padding(.horizontal, 20)
-                }
-            } else {
-                // Loading state
-                VStack(spacing: 16) {
-                    Circle()
-                        .fill(Color.gray.opacity(0.3))
-                        .frame(width: 100, height: 100)
-                    
-                    VStack(spacing: 8) {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.gray.opacity(0.3))
-                            .frame(width: 120, height: 20)
-                        
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.gray.opacity(0.2))
-                            .frame(width: 80, height: 16)
-                    }
-                }
-            }
+            return AnyView(profileOtherUserActionsSimple(profile: profile))
         }
     }
     
-    // MARK: - Profile Picture View
+    // Simplified other user actions to reduce type complexity
+    private func profileOtherUserActionsSimple(profile: UserProfile) -> some View {
+                    HStack(spacing: 12) {
+            // Follow button
+                        Button(action: {
+                            if let userId = userId {
+                                viewModel.toggleFollow(userId: userId)
+                            }
+                        }) {
+                                    Text(viewModel.isFollowing ? "Following" : "Follow")
+                                        .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                    .background(viewModel.isFollowing ? Color.gray : Color.purple)
+                            .cornerRadius(22)
+                        }
+                        .disabled(viewModel.isFollowActionLoading)
+                        
+            // Message button
+                        Button(action: {
+                            guard let target = userId else { return }
+                            DirectMessageService.shared.getOrCreateConversation(with: target) { convo, _ in
+                                if let convo = convo {
+                                    DispatchQueue.main.async { self.selectedConversation = convo }
+                                }
+                            }
+                        }) {
+                                Text("Message")
+                                    .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.purple)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(Color.purple.opacity(0.1))
+                        .cornerRadius(22)
+            }
+            
+            // More menu
+                        Menu {
+                Button("Report User") { showReportSheet = true }
+                Button("Block User") { showBlockSheet = true }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.title3)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+    
+    // MARK: - Profile Picture Placeholder (extracted to avoid type complexity)
+    private var profilePicturePlaceholder: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: [Color.gray.opacity(0.2), Color.gray.opacity(0.1)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .frame(width: 120, height: 120)
+            .overlay(
+                Image(systemName: "person.fill")
+                    .font(.system(size: 50))
+                    .foregroundColor(.gray.opacity(0.4))
+            )
+            .overlay(
+                Circle()
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.white, Color.gray.opacity(0.2)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 4
+                    )
+            )
+            .shadow(color: Color.black.opacity(0.1), radius: 12, x: 0, y: 6)
+    }
+        
+    // MARK: - Profile Picture View (Safe with Fallback)
+    @ViewBuilder
     private func profilePictureView(profile: UserProfile) -> some View {
-        Group {
-            if let url = profile.profilePictureUrl, let imageUrl = URL(string: url) {
-                CachedAsyncImage(url: imageUrl) { image in
+        if let urlString = profile.profilePictureUrl,
+           !urlString.isEmpty,
+           let imageUrl = URL(string: urlString) {
+            AsyncImage(url: imageUrl) { phase in
+                switch phase {
+                case .success(let image):
                     image
                         .resizable()
                         .scaledToFill()
-                } placeholder: {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.gray.opacity(0.2), Color.gray.opacity(0.1)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                        .frame(width: 120, height: 120)
+                        .clipShape(Circle())
                         .overlay(
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 50))
-                                .foregroundColor(.gray.opacity(0.4))
+                            Circle()
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [Color.white, Color.gray.opacity(0.2)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 4
+                                )
                         )
+                        .shadow(color: Color.black.opacity(0.1), radius: 12, x: 0, y: 6)
+                case .failure(_):
+                    profilePicturePlaceholder
+                case .empty:
+                    profilePicturePlaceholder
+                @unknown default:
+                    profilePicturePlaceholder
                 }
-                .frame(width: 120, height: 120)
-                .clipShape(Circle())
-                .overlay(
-                    Circle()
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.white, Color.gray.opacity(0.2)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 4
-                        )
-                )
-                .shadow(color: Color.black.opacity(0.1), radius: 12, x: 0, y: 6)
-            } else {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.gray.opacity(0.2), Color.gray.opacity(0.1)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 120, height: 120)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 50))
-                            .foregroundColor(.gray.opacity(0.4))
-                    )
-                    .overlay(
-                        Circle()
-                            .stroke(
-                                LinearGradient(
-                                    colors: [Color.white, Color.gray.opacity(0.2)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 4
-                            )
-                    )
-                    .shadow(color: Color.black.opacity(0.1), radius: 12, x: 0, y: 6)
             }
+        } else {
+            profilePicturePlaceholder
         }
     }
+
     
     // MARK: - Helper Functions
     private func formatNumber(_ number: Int) -> String {
@@ -1805,6 +2529,137 @@ struct UserProfileView: View {
                                         } else {
             return "\(number)"
         }
+    }
+
+    // MARK: - Simple subviews to reduce body complexity
+    
+    /// Decides whether to show blocked view or profile content - extracted to simplify body type inference
+    @ViewBuilder
+    private func profileOrBlockedView(for profile: UserProfile) -> some View {
+        // Use verified block status if available, otherwise use cached value
+        let isBlockedByThisUser: Bool = {
+            if let verified = verifiedBlockedByUser {
+                return verified
+            }
+            return blockingService.hasUserBlockedMe(profile.uid)
+        }()
+        
+        if isBlockedByThisUser {
+            blockedProfileView(message: "You are blocked by this user.")
+        } else if blockingService.isUserBlocked(profile.uid) {
+            blockedProfileView(message: "You have blocked this user.")
+        } else {
+            profileContentView
+        }
+    }
+    
+    /// Verify block status against authoritative source (the other user's blockedUsers array)
+    private func verifyBlockStatus(for userId: String) {
+        guard !isCurrentUser else { return }
+        
+        isVerifyingBlockStatus = true
+        
+        Task {
+            let actuallyBlocked = await blockingService.hasUserBlockedMeAsync(userId)
+            await MainActor.run {
+                verifiedBlockedByUser = actuallyBlocked
+                isVerifyingBlockStatus = false
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var loadingView: some View {
+        VStack {
+            Spacer()
+            ProgressView()
+                .scaleEffect(1.5)
+                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
+            Text("Loading profile...")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .padding(.top, 12)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    @ViewBuilder
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 48))
+                .foregroundColor(.red)
+            Text("Unable to load profile")
+                .font(.headline)
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Button("Try Again") {
+                fetchProfileAndLogs()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    @ViewBuilder
+    private var fallbackView: some View {
+        VStack {
+            Spacer()
+            Text("No profile data available")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Blocked Profile View
+    @ViewBuilder
+    private func blockedProfileView(message: String) -> some View {
+        VStack {
+            HStack {
+                Button(action: { dismiss() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                        Text("Back")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                }
+                .foregroundColor(.purple)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            
+            Spacer()
+            
+            VStack(spacing: 16) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 48, weight: .bold))
+                    .foregroundColor(.red)
+                Text(message)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                Text("This profile is not available.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 24)
+            
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.bottom, 24)
     }
     
     // MARK: - Recent Diary Section
@@ -1999,14 +2854,8 @@ struct UserProfileView: View {
                     print("🎯 UserProfileView: Stars navigation state set atomically with highlighted log")
                     AnalyticsService.shared.logTap(category: "diary_entry_rating", id: log.id)
                 }) {
-                    HStack(spacing: 2) {
-                        ForEach(1...5, id: \.self) { star in
-                            Image(systemName: star <= rating ? "star.fill" : "star")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(star <= rating ? .yellow : .gray.opacity(0.4))
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    StarRatingDisplayView(rating: rating, starSize: 12, spacing: 2, showNumber: true)
+                        .padding(.vertical, 4)
                 }
                 .buttonStyle(BumpinButtonStyle())
                     } else {
@@ -2180,23 +3029,13 @@ struct UserProfileView: View {
     
     // Reusable pinned music card (songs, artists, albums)
     private func pinnedMusicCard(item: PinnedItem, index: Int, type: PinnedType, showRanking: Bool) -> some View {
-        let cardContent = VStack(alignment: .leading, spacing: 14) {
-            pinnedMusicCardArtwork(item: item, index: index, type: type, showRanking: showRanking)
-            pinnedMusicCardTitle(item: item, type: type)
-        }
-        
-        return cardContent
-            .frame(width: 120, height: type == .artist ? 160 : 180) // Increased height for songs/albums
-            .padding(12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(.systemBackground))
-                    .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(Color(.systemGray6), lineWidth: 1)
-            )
+        PinnedMusicCardView(item: item, index: index, type: type, showRanking: showRanking, onTap: {
+            navigateToPinnedItem(item: item, type: type)
+        }, onArtistTap: { artistName in
+            selectedArtistName = artistName
+            showArtistProfile = true
+            AnalyticsService.shared.logTap(category: "pinned_\(type == .song ? "song" : "album")_artist", id: artistName)
+        })
     }
     
     // Artwork component for pinned music card
@@ -2313,138 +3152,6 @@ struct UserProfileView: View {
         )
         print("🎯 UserProfileView: Pinned item navigation state set atomically")
         AnalyticsService.shared.logTap(category: "pinned_\(itemType)", id: item.id)
-    }
-    
-    // Pinned list placeholder (when no cover art available)
-    private var listPlaceholderView: some View {
-        RoundedRectangle(cornerRadius: 12)
-            .fill(
-                LinearGradient(
-                    colors: [Color.purple.opacity(0.15), Color.blue.opacity(0.1)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .frame(width: 120, height: 120)
-            .overlay(
-                VStack(spacing: 8) {
-                    Image(systemName: "list.bullet.rectangle")
-                        .font(.system(size: 32))
-                        .foregroundColor(.purple)
-                    
-                    Text("List")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.purple.opacity(0.8))
-                }
-            )
-    }
-    
-    // List cover view with artwork or placeholder
-    private func listCoverView(for item: PinnedItem, from userLists: [MusicList]) -> some View {
-        let currentList = userLists.first(where: { $0.id == item.id })
-        
-        return Group {
-            if let list = currentList,
-               let coverUrl = list.coverImageUrl,
-               !coverUrl.isEmpty,
-               let url = URL(string: coverUrl) {
-                // Show actual cover art
-                CachedAsyncImage(url: url) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    listPlaceholderView
-                }
-                .frame(width: 120, height: 120)
-                .cornerRadius(12)
-            } else {
-                // Fallback to gradient placeholder
-                listPlaceholderView
-            }
-        }
-        .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: 4)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color(.systemGray6), lineWidth: 1)
-        )
-    }
-    
-    // Pinned list card (different from music cards)
-    private func pinnedListCard(item: PinnedItem, index: Int, showRanking: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // List Cover with ranking badge
-            ZStack(alignment: .topTrailing) {
-                Button(action: {
-                    // Navigate to list detail
-                    if let list = userLists.first(where: { $0.id == item.id }) {
-                        selectedList = list
-                    }
-                    AnalyticsService.shared.logTap(category: "pinned_list", id: item.id)
-                }) {
-                    listCoverView(for: item, from: userLists)
-                }
-                .buttonStyle(BumpinButtonStyle())
-                
-                // Ranking badge
-                if showRanking {
-                    Text("#\(index)")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            LinearGradient(
-                                colors: [Color.purple, Color.purple.opacity(0.8)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .cornerRadius(12)
-                        .shadow(color: Color.purple.opacity(0.3), radius: 4, x: 0, y: 2)
-                        .offset(x: -8, y: 8)
-                }
-            }
-            
-            // List Title with song count
-            VStack(alignment: .leading, spacing: 4) {
-                Button(action: {
-                    // Navigate to list detail
-                    if let list = userLists.first(where: { $0.id == item.id }) {
-                        selectedList = list
-                    }
-                    AnalyticsService.shared.logTap(category: "pinned_list_title", id: item.id)
-                }) {
-                    Text(item.title)
-                        .font(.system(size: 14, weight: .semibold, design: .default))
-                        .foregroundColor(.primary)
-                                            .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .frame(width: 120, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                
-                // Show list count if available
-                if let list = userLists.first(where: { $0.id == item.id }) {
-                    Text("\(list.items.count) songs")
-                        .font(.system(size: 12, weight: .medium, design: .default))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .frame(width: 120, alignment: .leading)
-                }
-            }
-        }
-        .frame(width: 120, height: 180) // Consistent height with music cards
-        .padding(12)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 16)
-                .fill(Color(.systemBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(Color(.systemGray6), lineWidth: 1)
-        )
     }
     
     // Placeholder for pinned items without artwork
@@ -2640,44 +3347,6 @@ struct UserProfileView: View {
         }
     }
     
-    // MARK: - Pinned Lists Section
-    private var pinnedListsSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Section Header
-            pinnedSectionHeader(
-                title: "Pinned Lists",
-                icon: "list.bullet.rectangle",
-                onEdit: isCurrentUser ? { showEditPinnedLists = true } : nil,
-                showRankingToggle: isCurrentUser ? $showRankingForLists : nil
-            )
-            
-            // Scrollable Content
-            if let profile = profile, let pinnedLists = profile.pinnedLists, !pinnedLists.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 16) {
-                        ForEach(Array(pinnedLists.enumerated()), id: \.element.id) { index, item in
-                            pinnedListCard(
-                                item: item,
-                                index: index + 1,
-                                showRanking: showRankingForLists
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                }
-                    } else {
-                pinnedEmptyState(
-                    type: .song, // Using song as placeholder since lists aren't in PinnedType
-                    icon: "list.bullet.rectangle",
-                    title: "No pinned lists",
-                    subtitle: isCurrentUser ? "Pin your favorite lists to showcase them" : "No lists pinned yet",
-                    buttonTitle: "Pin Lists",
-                    onAdd: isCurrentUser ? { showEditPinnedLists = true } : nil
-                )
-            }
-        }
-    }
-    
     // MARK: - Rating Distribution Section
     private var ratingDistributionSection: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -2723,16 +3392,171 @@ struct UserProfileView: View {
         let ratedLogs = logs.filter { $0.rating != nil && $0.rating! > 0 }
         let ratingData = calculateRatingDistribution(from: ratedLogs)
         
-        return VStack(spacing: 6) {
-            ForEach(ratingData.sorted(by: { $0.starRating > $1.starRating })) { rating in
+        return VStack(spacing: 8) {
+            ForEach(ratingData.sorted(by: { $0.lowerBound > $1.lowerBound })) { bucket in
                 RatingBarRow(
-                    rating: rating,
+                    bucket: bucket,
                     maxCount: ratingData.map(\.count).max() ?? 1,
-                    color: starColor(for: rating.starRating)
+                    color: colorForBucket(bucket),
+                    onTap: {
+                        selectedRatingBucket = bucket
+                    }
                 )
             }
         }
         .padding(.horizontal, 4)
+    }
+
+    private struct RatingBarRow: View {
+        let bucket: RatingDistributionData
+        let maxCount: Int
+        let color: Color
+        var onTap: (() -> Void)? = nil
+        
+        private var barWidth: CGFloat {
+            guard maxCount > 0, bucket.count >= 0 else { return 0 }
+            let width = CGFloat(bucket.count) / CGFloat(maxCount)
+            return min(max(width, 0), 1)
+        }
+        
+        var body: some View {
+            HStack(spacing: 12) {
+                // Rating label
+                Text(bucket.bucketRange)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 80, alignment: .leading)
+                
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(.systemGray6))
+                            .frame(height: 20)
+                        
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(
+                                LinearGradient(
+                                    colors: [color, color.opacity(0.6)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: geometry.size.width * barWidth, height: 20)
+                            .shadow(color: color.opacity(0.25), radius: 2, x: 0, y: 1)
+                    }
+                }
+                .frame(height: 20)
+                
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(bucket.count)")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.primary)
+                    
+                    Text("\(Int(bucket.percentage))%")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(width: 40, alignment: .trailing)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onTap?()
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: Color.black.opacity(0.03), radius: 2, x: 0, y: 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(color.opacity(0.12), lineWidth: 1)
+            )
+        }
+    }
+    
+    // MARK: - Profile Rating Bucket Detail Sheet
+    private struct ProfileRatingBucketDetailView: View {
+        @Environment(\.dismiss) private var dismiss
+        let bucket: RatingDistributionData
+        let logs: [MusicLog]
+        let subtitle: String?
+        let isCurrentUser: Bool
+        let onLogTap: (MusicLog) -> Void
+        let onEdit: ((MusicLog) -> Void)?
+        let onDelete: ((MusicLog) -> Void)?
+        let onCorrectGenre: ((MusicLog) -> Void)?
+        
+        var body: some View {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    if let subtitle = subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .padding(.vertical, 12)
+                    }
+                    
+                    Divider()
+                    
+                    if logs.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "star.slash")
+                                .font(.system(size: 44, weight: .light))
+                                .foregroundColor(.secondary)
+                            Text("No logs in this range yet.")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.vertical, 40)
+                        .background(Color(.systemGroupedBackground))
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 16) {
+                                ForEach(logs) { log in
+                                    DiaryLogCard(
+                                        log: log,
+                                        onTap: {
+                                            dismiss()
+                                            onLogTap(log)
+                                        },
+                                        onEdit: wrappedAction(for: onEdit, log: log),
+                                        onDelete: wrappedAction(for: onDelete, log: log),
+                                        onCorrectGenre: wrappedAction(for: onCorrectGenre, log: log),
+                                        isCurrentUser: isCurrentUser
+                                    )
+                                    .padding(.horizontal, 16)
+                                }
+                            }
+                            .padding(.vertical, 20)
+                        }
+                        .background(Color(.systemGroupedBackground))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.systemGroupedBackground))
+                .navigationTitle(bucket.bucketRange)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Close") {
+                            dismiss()
+                        }
+                    }
+                }
+            }
+        }
+        
+        private func wrappedAction(for action: ((MusicLog) -> Void)?, log: MusicLog) -> (() -> Void)? {
+            guard let action else { return nil }
+            return {
+                dismiss()
+                action(log)
+            }
+        }
     }
     
     // MARK: - Rating Distribution Loading State
@@ -2797,39 +3621,61 @@ struct UserProfileView: View {
     
     // MARK: - Rating Distribution Helper Methods
     private func calculateRatingDistribution(from logs: [MusicLog]) -> [RatingDistributionData] {
-        var ratingCounts: [Int: Int] = [:]
+        let totalCount = logs.count
         
-        // Count ratings for each star level
+        // Define 10 half-star buckets
+        let buckets: [(Double, Double)] = [
+            (1.0, 1.4),
+            (1.5, 1.9),
+            (2.0, 2.4),
+            (2.5, 2.9),
+            (3.0, 3.4),
+            (3.5, 3.9),
+            (4.0, 4.4),
+            (4.5, 4.9),
+            (5.0, 5.0)  // Exactly 5.0 stars
+        ]
+        
+        // Count ratings in each bucket
+        var bucketCounts: [Int] = Array(repeating: 0, count: buckets.count)
+        
         for log in logs {
-            if let rating = log.rating, rating > 0 && rating <= 5 {
-                ratingCounts[rating, default: 0] += 1
+            guard let rating = log.rating, rating > 0 else { continue }
+            
+            // Find which bucket this rating belongs to
+            for (index, bucket) in buckets.enumerated() {
+                if rating >= bucket.0 && rating <= bucket.1 {
+                    bucketCounts[index] += 1
+                    break
+                }
             }
         }
         
-        let totalCount = logs.count
-        
-        // Create distribution data for all star levels (1-5)
-        var distributionData: [RatingDistributionData] = []
-        for star in 1...5 {
-            let count = ratingCounts[star] ?? 0
-            distributionData.append(RatingDistributionData(
-                starRating: star,
-                count: count,
+        // Create distribution data
+        return buckets.enumerated().map { index, bucket in
+            RatingDistributionData(
+                lowerBound: bucket.0,
+                upperBound: bucket.1,
+                count: bucketCounts[index],
                 totalRatings: totalCount
-            ))
+            )
         }
-        
-        return distributionData
     }
     
-    private func starColor(for rating: Int) -> Color {
-        switch rating {
-        case 1: return .red
-        case 2: return .orange
-        case 3: return .yellow
-        case 4: return .green
-        case 5: return .blue
-        default: return .gray
+    private func colorForBucket(_ bucket: RatingDistributionData) -> Color {
+        let midPoint = (bucket.lowerBound + bucket.upperBound) / 2.0
+        
+        switch midPoint {
+        case 0..<1.75:
+            return .red
+        case 1.75..<2.75:
+            return .orange
+        case 2.75..<3.75:
+            return .yellow
+        case 3.75..<4.5:
+            return .green
+        default:
+            return .blue
         }
     }
     
@@ -2936,54 +3782,10 @@ struct UserProfileView: View {
     private func genreLegend(data: [GenreData]) -> some View {
         VStack(spacing: 12) {
             ForEach(data.prefix(6)) { genre in
-                Button(action: {
+                GenreLegendRow(genre: genre, onTap: {
                     selectedGenreForDetail = genre.name
                     print("🎯 Opening genre detail for: \(genre.name)")
-                }) {
-                    HStack(spacing: 12) {
-                        // Color indicator
-                        Circle()
-                            .fill(genreColor(for: genre.name))
-                            .frame(width: 12, height: 12)
-                            .shadow(color: genreColor(for: genre.name).opacity(0.3), radius: 2, x: 0, y: 1)
-                        
-                        // Genre name
-                        Text(genre.name.capitalized)
-                            .font(.system(size: 15, weight: .medium, design: .default))
-                            .foregroundColor(.primary)
-                        
-                        Spacer()
-                        
-                        // Percentage and count
-                        VStack(alignment: .trailing, spacing: 1) {
-                            Text("\(Int(genre.percentage))%")
-                                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                .foregroundColor(.primary)
-                            
-                            Text("\(genre.count) logs")
-                                .font(.system(size: 11, weight: .medium, design: .default))
-                                .foregroundColor(.secondary)
-                        }
-                        
-                        // Subtle chevron to indicate it's clickable
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color(.systemBackground))
-                            .shadow(color: Color.black.opacity(0.03), radius: 4, x: 0, y: 2)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(genreColor(for: genre.name).opacity(0.2), lineWidth: 1)
-                    )
-                }
-                .buttonStyle(PlainButtonStyle())
-                .animation(nil, value: selectedGenreForDetail) // Disable button animations
+                }, genreColor: genreColor)
             }
             
             // Show more genres if there are more than 6
@@ -3156,58 +3958,10 @@ struct UserProfileView: View {
     
     // MARK: - Individual Stats Card
     private func statsCard(stat: UserStat) -> some View {
-        Button(action: {
-            // Navigate to filtered view for this stat category
+        StatsCardView(stat: stat, onTap: {
             selectedStatCategory = stat.statCategory
             AnalyticsService.shared.logTap(category: "profile_stat", id: stat.category)
-        }) {
-            VStack(spacing: 12) {
-                // Icon with background
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [stat.color.opacity(0.15), stat.color.opacity(0.05)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 50, height: 50)
-                    
-                    Image(systemName: stat.icon)
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundColor(stat.color)
-                }
-                
-                // Number and label
-                VStack(spacing: 4) {
-                    Text(formatNumber(stat.count))
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    
-                    Text(stat.label)
-                        .font(.system(size: 12, weight: .medium, design: .default))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.9)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
-            .padding(.horizontal, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(.systemBackground))
-                    .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 4)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(stat.color.opacity(0.1), lineWidth: 1.5)
-            )
-        }
-        .buttonStyle(BumpinButtonStyle())
+        }, formatNumber: formatNumber)
     }
     
     // MARK: - Stats Loading State
@@ -3389,21 +4143,15 @@ struct UserProfileView: View {
         // Count genres from song logs using the AI-classified primaryGenre field
         var genreCounts: [String: Int] = [:]
         
+        var logsByGenre: [String: [MusicLog]] = [:]
+        
         for log in songLogs {
-            // Use the primaryGenre from our AI classification system
-            let genre: String
-            if let primaryGenre = log.primaryGenre {
-                // Use AI-classified genre (single genre per log)
-                genre = primaryGenre
-                print("🤖 Using AI-classified genre: \(log.title) by \(log.artistName) → \(genre)")
-            } else {
-                // Fallback for older logs without AI classification
-                genre = classifyGenreFallback(title: log.title, artist: log.artistName)
-                print("🔄 Fallback classification: \(log.title) by \(log.artistName) → \(genre)")
-            }
-            
+            let genre = resolvedGenre(for: log)
             genreCounts[genre, default: 0] += 1
+            logsByGenre[genre, default: []].append(log)
         }
+        
+        genreLogsByName = logsByGenre
         
         let totalCount = songLogs.count
         
@@ -3418,6 +4166,14 @@ struct UserProfileView: View {
         
         print("🎯 Genre distribution calculated: \(genreData.map { "\($0.name): \($0.count)" }.joined(separator: ", "))")
         return genreData
+    }
+    
+    private func resolvedGenre(for log: MusicLog) -> String {
+        if let primaryGenre = log.primaryGenre, !primaryGenre.isEmpty {
+            print("🤖 Using AI-classified genre: \(log.title) by \(log.artistName) → \(primaryGenre)")
+            return primaryGenre
+        }
+        return classifyGenreFallback(title: log.title, artist: log.artistName)
     }
     
     // Phase 2: Map Apple Music genres to our standardized categories
@@ -3497,6 +4253,14 @@ struct UserProfileView: View {
             print("🎯 Unmapped Apple Music genre: \(appleMusicGenre)")
             return "Other"
         }
+    }
+    
+    private func logsForGenre(_ genre: String) -> [MusicLog] {
+        if let cached = genreLogsByName[genre], !cached.isEmpty {
+            return cached
+        }
+        // Fallback: filter song logs using resolved genre
+        return logs.filter { $0.itemType == "song" && resolvedGenre(for: $0) == genre }
     }
     
     // Phase 3: Enhanced classifier that learns from user corrections
@@ -3842,7 +4606,7 @@ struct UserProfileView: View {
         
         return Group {
             if isLoading {
-                loadingView
+                listenLaterLoadingView
             } else if items.isEmpty {
                 emptyStateView(for: section)
             } else {
@@ -3880,7 +4644,7 @@ struct UserProfileView: View {
         }
     }
     
-    private var loadingView: some View {
+    private var listenLaterLoadingView: some View {
         VStack(spacing: 20) {
             ProgressView()
                 .scaleEffect(1.2)
@@ -4176,25 +4940,71 @@ struct StatDetailListView: View {
     let category: StatCategory
     let logs: [MusicLog]
     let userLists: [MusicList]
+    let listCoverImages: [String: URL]
     let userReposts: [Repost]
+    let repostedLogs: [MusicLog]
     let profile: UserProfile?
     @Environment(\.dismiss) private var dismiss
     @State private var selectedMusicItem: MusicSearchResult? = nil
     @State private var selectedPinnedLog: MusicLog? = nil
     @State private var selectedList: MusicList? = nil
+    @State private var selectedArtistName: String? = nil
+    @State private var showArtistProfile = false
+    @State private var selectedArtistForLogs: String? = nil
+    @State private var showArtistLogs = false
     
     var body: some View {
         NavigationView {
             ScrollView {
                 LazyVStack(spacing: 16) {
-                    ForEach(filteredItems, id: \.id) { item in
-                        StatDetailCard(item: item, category: category)
-                            .onTapGesture {
-                                handleCardTap(item: item)
-                            }
+                    // Use log cards for logs, songs, albums, and reposts
+                    if category == .logs || category == .songs || category == .albums || category == .reposts {
+                        ForEach(logsToDisplay, id: \.id) { log in
+                            PopularLogRow(log: log, reposterNames: nil)
+                                .padding(.horizontal, 16)
+                        }
+                    } else {
+                        // Use old format for artists and lists
+                        ForEach(filteredItems, id: \.id) { item in
+                            if category == .artists {
+                                StatDetailCard(
+                                    item: item,
+                                    category: category,
+                                    onArtistNameTap: {
+                                        selectedArtistName = item.title
+                                        showArtistProfile = true
+                                    },
+                                    onArtistPFPTap: {
+                                        selectedArtistName = item.title
+                                        showArtistProfile = true
+                                    },
+                                    onCardTap: {
+                                        selectedArtistForLogs = item.title
+                                        showArtistLogs = true
+                                    }
+                                )
+                            } else if category == .lists {
+                                StatDetailCard(
+                                    item: item,
+                                    category: category,
+                                    listCoverImages: listCoverImages,
+                                    onCardTap: {
+                                        handleCardTap(item: item)
+                                    }
+                                )
+                            } else {
+                                StatDetailCard(
+                                    item: item,
+                                    category: category,
+                                    listCoverImages: listCoverImages,
+                                    onCardTap: {
+                                        handleCardTap(item: item)
+                                    }
+                                )
+                                }
+                        }
                     }
                 }
-                .padding(.horizontal, 16)
                 .padding(.vertical, 20)
             }
             .navigationTitle(category.title)
@@ -4216,6 +5026,42 @@ struct StatDetailListView: View {
         .fullScreenCover(item: $selectedList) { list in
             ListDetailView(list: list)
         }
+        .fullScreenCover(isPresented: $showArtistProfile) {
+            if let artistName = selectedArtistName {
+                ArtistProfileView(artistName: artistName)
+                    .environmentObject(NavigationCoordinator())
+            }
+        }
+        .sheet(isPresented: $showArtistLogs) {
+            if let artistName = selectedArtistForLogs {
+                ArtistLogListView(
+                    artistName: artistName,
+                    logs: logs.filter { logContainsArtist($0, artistName: artistName) }
+                )
+            }
+        }
+    }
+    
+    // Get the logs to display based on category
+    private var logsToDisplay: [MusicLog] {
+        switch category {
+        case .logs:
+            return logs.sorted { $0.dateLogged > $1.dateLogged }
+        case .songs:
+            // Group by song ID and take the most recent log for each
+            let grouped = Dictionary(grouping: logs.filter { $0.itemType == "song" }) { $0.itemId }
+            return grouped.compactMap { $0.value.max(by: { $0.dateLogged < $1.dateLogged }) }
+                .sorted { $0.dateLogged > $1.dateLogged }
+        case .albums:
+            // Group by album ID and take the most recent log for each
+            let grouped = Dictionary(grouping: logs.filter { $0.itemType == "album" }) { $0.itemId }
+            return grouped.compactMap { $0.value.max(by: { $0.dateLogged < $1.dateLogged }) }
+                .sorted { $0.dateLogged > $1.dateLogged }
+        case .reposts:
+            return repostedLogs
+        default:
+            return []
+        }
     }
     
     // Handle card tap based on category
@@ -4232,9 +5078,9 @@ struct StatDetailListView: View {
                 // Found a matching log by ID or itemId
                 selectedPinnedLog = log
             } else {
-                // For aggregated items (songs, albums, artists), find any log with matching itemId or artistName
+                // For aggregated items (songs, albums, artists), find any log with matching itemId or artist name
                 if let log = logs.first(where: { 
-                    $0.itemId == item.id || $0.artistName == item.title
+                    $0.itemId == item.id || logContainsArtist($0, artistName: item.title)
                 }) {
                     selectedPinnedLog = log
                 } else {
@@ -4286,19 +5132,52 @@ struct StatDetailListView: View {
                 )
             }.sorted { $0.dateLogged > $1.dateLogged }
         case .artists:
-            let uniqueArtists = Dictionary(grouping: logs) { $0.artistName }
-            return uniqueArtists.compactMap { (artistName, logs) in
-                return StatDetailItem(
-                    id: artistName,
-                    title: artistName,
-                    subtitle: "\(logs.count) logs",
-                    artworkUrl: logs.first?.artworkUrl,
+            var artistLogs: [String: [MusicLog]] = [:]
+            var displayNames: [String: String] = [:]
+            
+            for log in logs {
+                let artists = artistNamesForLog(log)
+                for artist in artists {
+                    let key = ArtistNameParser.normalizedKey(artist)
+                    guard !key.isEmpty else { continue }
+                    artistLogs[key, default: []].append(log)
+                    if displayNames[key] == nil {
+                        displayNames[key] = artist
+                    }
+                }
+            }
+            
+            let artistItemsWithCounts: [(item: StatDetailItem, count: Int)] = artistLogs.compactMap { key, artistLogs in
+                let displayName = displayNames[key] ?? key
+                let sortedLogs = artistLogs.sorted { $0.dateLogged > $1.dateLogged }
+                let mostRecentRating = sortedLogs.first(where: { $0.rating != nil })?.rating
+                let mostRecentDate = artistLogs.map { $0.dateLogged }.max() ?? Date()
+                let logCount = artistLogs.count
+                let subtitle = logCount == 1 ? "1 log" : "\(logCount) logs"
+                let hasReview = artistLogs.contains { $0.review != nil && !($0.review?.isEmpty ?? true) }
+                
+                let item = StatDetailItem(
+                    id: key,
+                    title: displayName,
+                    subtitle: subtitle,
+                    artworkUrl: nil,
                     itemType: "artist",
-                    rating: nil,
-                    dateLogged: logs.map { $0.dateLogged }.max() ?? Date(),
-                    hasReview: false
+                    rating: mostRecentRating,
+                    dateLogged: mostRecentDate,
+                    hasReview: hasReview
                 )
-            }.sorted { $0.dateLogged > $1.dateLogged }
+                
+                return (item, logCount)
+            }
+            
+            return artistItemsWithCounts
+                .sorted { lhs, rhs in
+                    if lhs.count != rhs.count {
+                        return lhs.count > rhs.count
+                    }
+                    return lhs.item.title.localizedCaseInsensitiveCompare(rhs.item.title) == .orderedAscending
+                }
+                .map { $0.item }
         case .albums:
             let uniqueAlbums = Dictionary(grouping: logs.filter { $0.itemType == "album" }) { $0.itemId }
             return uniqueAlbums.compactMap { (_, logs) in
@@ -4315,39 +5194,20 @@ struct StatDetailListView: View {
                 )
             }.sorted { $0.dateLogged > $1.dateLogged }
         case .reposts:
-            return userReposts.compactMap { repost in
-                // For log reposts, find the original log
-                if let logId = repost.logId {
-                    if let originalLog = logs.first(where: { $0.id == logId }) {
-                        return StatDetailItem(
-                            id: repost.id,
-                            title: originalLog.title,
-                            subtitle: originalLog.artistName,
-                            artworkUrl: originalLog.artworkUrl,
-                            itemType: originalLog.itemType,
-                            rating: originalLog.rating,
-                            dateLogged: repost.createdAt,
-                            hasReview: originalLog.review != nil && !(originalLog.review?.isEmpty ?? true)
-                        )
-                    }
-                }
-                
-                // For item reposts, create a basic entry
-                if let itemId = repost.itemId, let itemType = repost.itemType {
-                    return StatDetailItem(
-                        id: repost.id,
-                        title: "Reposted \(itemType.capitalized)",
-                        subtitle: "Item ID: \(itemId)",
-                        artworkUrl: nil,
-                        itemType: itemType,
-                        rating: nil,
-                        dateLogged: repost.createdAt,
-                        hasReview: false
-                    )
-                }
-                
-                return nil
-            }.sorted { $0.dateLogged > $1.dateLogged }
+            // Use the repostedLogs array which contains the full log objects
+            return repostedLogs.enumerated().compactMap { (index, log) in
+                let repost = index < userReposts.count ? userReposts[index] : nil
+                return StatDetailItem(
+                    id: log.id,
+                    title: log.title,
+                    subtitle: log.artistName,
+                    artworkUrl: log.artworkUrl,
+                    itemType: log.itemType,
+                    rating: log.rating,
+                    dateLogged: repost?.createdAt ?? log.dateLogged,
+                    hasReview: log.review != nil && !(log.review?.isEmpty ?? true)
+                )
+            }
         case .lists:
             return userLists.map { list in
                 StatDetailItem(
@@ -4372,7 +5232,7 @@ struct StatDetailItem: Identifiable {
     let subtitle: String
     let artworkUrl: String?
     let itemType: String
-    let rating: Int?
+    let rating: Double?
     let dateLogged: Date
     let hasReview: Bool
 }
@@ -4381,51 +5241,92 @@ struct StatDetailItem: Identifiable {
 struct StatDetailCard: View {
     let item: StatDetailItem
     let category: StatCategory
+    var listCoverImages: [String: URL] = [:]
+    var onArtistNameTap: (() -> Void)? = nil
+    var onArtistPFPTap: (() -> Void)? = nil
+    var onCardTap: (() -> Void)? = nil
+    @State private var resolvedArtworkURL: String? = nil
+    @State private var isFetchingArtistArtwork = false
     
     var body: some View {
+        let artworkURLToUse = resolvedArtworkURL ?? item.artworkUrl
                             HStack(spacing: 16) {
-                                // Artwork
+            // Artwork - clickable for artists
             Group {
-                if let artworkUrl = item.artworkUrl, let url = URL(string: artworkUrl) {
+                if category == .lists,
+                   let coverURL = listCoverImages[item.id] {
+                    CachedAsyncImage(url: coverURL) { image in
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    } placeholder: {
+                        artworkPlaceholder
+                    }
+                } else if let artworkUrl = artworkURLToUse,
+                          let url = URL(string: artworkUrl) {
                     CachedAsyncImage(url: url) { image in
                         image
                             .resizable()
                             .scaledToFill()
-                                    } placeholder: {
+                    } placeholder: {
                         artworkPlaceholder
-                                    }
-                                } else {
+                    }
+                } else {
                     artworkPlaceholder
                 }
             }
             .frame(width: 60, height: 60)
             .cornerRadius(item.itemType == "artist" ? 30 : 8)
             .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+            .onTapGesture {
+                if item.itemType == "artist" {
+                    onArtistPFPTap?()
+                }
+            }
                                 
                                 // Content
             VStack(alignment: .leading, spacing: 6) {
+                // Artist name - purple and clickable for artists
+                if item.itemType == "artist" {
+                    Button(action: {
+                        onArtistNameTap?()
+                    }) {
+                        Text(item.title)
+                            .font(.system(size: 16, weight: .semibold, design: .default))
+                            .foregroundColor(.purple)
+                            .lineLimit(1)
+                    }
+                } else {
                 Text(item.title)
                     .font(.system(size: 16, weight: .semibold, design: .default))
                     .foregroundColor(.primary)
                     .lineLimit(1)
+                }
                 
+                // Subtitle with rating - tappable for artists (card body)
+                HStack(spacing: 6) {
                 Text(item.subtitle)
                     .font(.system(size: 14, weight: .medium, design: .default))
                                             .foregroundColor(.secondary)
                                             .lineLimit(1)
                 
-                HStack(spacing: 8) {
-                    // Rating if available
+                    // Rating with stars if available
                     if let rating = item.rating {
-                        HStack(spacing: 2) {
-                            ForEach(1...5, id: \.self) { star in
-                                Image(systemName: star <= rating ? "star.fill" : "star")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundColor(star <= rating ? .yellow : .gray.opacity(0.4))
-                            }
-                        }
+                        StarRatingDisplayView(
+                            rating: rating,
+                            starSize: 10,
+                            spacing: 1
+                        )
                     }
-                    
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if item.itemType == "artist" {
+                        onCardTap?()
+                    }
+                }
+                
+                HStack(spacing: 8) {
                     // Review indicator
                     if item.hasReview {
                         HStack(spacing: 2) {
@@ -4448,14 +5349,26 @@ struct StatDetailCard: View {
                         .font(.system(size: 11, weight: .medium, design: .default))
                     .foregroundColor(.secondary)
                 }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if item.itemType == "artist" {
+                        onCardTap?()
+                    }
+                }
             }
             
             Spacer()
             
-            // Navigation arrow
+            // Navigation arrow - tappable for artists (card body)
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(.secondary)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if item.itemType == "artist" {
+                        onCardTap?()
+                    }
+                }
         }
         .padding(16)
         .background(
@@ -4467,6 +5380,22 @@ struct StatDetailCard: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(Color(.systemGray6), lineWidth: 1)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // For non-artists, trigger card tap
+            // For artists, this will only fire if name/PFP/subtitle/date/chevron don't consume the tap
+            if item.itemType != "artist" {
+                onCardTap?()
+            }
+        }
+        .onAppear {
+            if resolvedArtworkURL == nil {
+                resolvedArtworkURL = item.artworkUrl
+            }
+        }
+        .task {
+            await fetchArtistArtworkIfNeeded()
+        }
     }
     
     // Artwork placeholder
@@ -4497,6 +5426,78 @@ struct StatDetailCard: View {
         }
     }
     
+    private func fetchArtistArtworkIfNeeded() async {
+        guard item.itemType == "artist" else { return }
+        
+        if let cached = await ArtistArtworkURLCache.shared.url(for: item.title) {
+            await MainActor.run {
+                resolvedArtworkURL = cached
+            }
+            return
+        }
+        
+        if isFetchingArtistArtwork {
+            return
+        }
+        
+        await MainActor.run {
+            isFetchingArtistArtwork = true
+        }
+        
+        do {
+            var request = MusicCatalogSearchRequest(term: item.title, types: [MusicKit.Artist.self])
+            request.limit = 5
+            let response = try await request.response()
+            let matchedArtist = response.artists.first { artist in
+                artist.name.caseInsensitiveCompare(item.title) == .orderedSame
+            } ?? response.artists.first
+            
+            if let artworkURL = matchedArtist?.artwork?.url(width: 400, height: 400)?.absoluteString {
+                await ArtistArtworkURLCache.shared.store(url: artworkURL, for: item.title)
+                await MainActor.run {
+                    resolvedArtworkURL = artworkURL
+                }
+            }
+        } catch {
+            print("❌ Failed to fetch artist artwork for \(item.title): \(error.localizedDescription)")
+        }
+        
+        await MainActor.run {
+            isFetchingArtistArtwork = false
+        }
+    }
+    
+}
+
+// Cache artist artwork URLs to prevent repeated MusicKit lookups
+actor ArtistArtworkURLCache {
+    static let shared = ArtistArtworkURLCache()
+    private var cache: [String: String] = [:]
+    
+    func url(for artistName: String) -> String? {
+        cache[artistName.lowercased()]
+    }
+    
+    func store(url: String, for artistName: String) {
+        cache[artistName.lowercased()] = url
+    }
+}
+
+// MARK: - Artist Helper Functions
+
+private func artistNamesForLog(_ log: MusicLog) -> [String] {
+    let parsed = ArtistNameParser.splitArtists(from: log.artistName)
+    if parsed.isEmpty {
+        let trimmed = log.artistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? [] : [trimmed]
+    }
+    return parsed
+}
+
+private func logContainsArtist(_ log: MusicLog, artistName: String) -> Bool {
+    let targetKey = ArtistNameParser.normalizedKey(artistName)
+    guard !targetKey.isEmpty else { return false }
+    return artistNamesForLog(log).contains { ArtistNameParser.normalizedKey($0) == targetKey }
 }
 
 // MARK: - Listen Later Item Row View
@@ -4634,3 +5635,294 @@ struct ListenLaterItemRowView: View {
         }
     }
 }
+// MARK: - Pinned Music Card With Press State
+
+struct PinnedMusicCardView: View {
+    let item: PinnedItem
+    let index: Int
+    let type: PinnedType
+    let showRanking: Bool
+    let onTap: () -> Void
+    let onArtistTap: (String) -> Void
+    
+    @State private var isPressed = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Artwork
+            ZStack(alignment: .topTrailing) {
+                Button(action: onTap) {
+                    Group {
+                        if let artworkUrl = item.artworkUrl, let url = URL(string: artworkUrl) {
+                            CachedAsyncImage(url: url) { image in
+                                image.resizable().scaledToFill()
+                            } placeholder: {
+                                pinnedPlaceholder
+                            }
+                        } else {
+                            pinnedPlaceholder
+                        }
+                    }
+                    .frame(width: 120, height: 120)
+                    .cornerRadius(type == .artist ? 60 : 12)
+                    .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: 4)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: type == .artist ? 60 : 12)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                if showRanking {
+                    rankingBadge
+                }
+            }
+            
+            // Title
+            VStack(alignment: .leading, spacing: 4) {
+                Button(action: onTap) {
+                    Text(item.title)
+                        .font(.system(size: 14, weight: .semibold, design: .default))
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(width: 120, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                
+                // Artist name (for songs and albums)
+                if type != .artist && !item.artistName.isEmpty {
+                    Button(action: { onArtistTap(item.artistName) }) {
+                        Text(item.artistName)
+                            .font(.system(size: 12, weight: .medium, design: .default))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .multilineTextAlignment(.leading)
+                            .frame(width: 120, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(width: 120, alignment: .leading)
+        }
+        .frame(width: 120, height: type == .artist ? 160 : 180)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.systemBackground))
+                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color(.systemGray6), lineWidth: 1)
+        )
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+    
+    private var pinnedPlaceholder: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color.purple.opacity(0.3), Color.purple.opacity(0.1)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: type == .artist ? "person.fill" : "music.note")
+                .font(.system(size: 40))
+                .foregroundColor(.white.opacity(0.8))
+        }
+    }
+    
+    private var rankingBadge: some View {
+        Text("#\(index)")
+            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .foregroundColor(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                LinearGradient(
+                    colors: [Color.purple, Color.purple.opacity(0.8)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .cornerRadius(12)
+            .shadow(color: Color.purple.opacity(0.3), radius: 4, x: 0, y: 2)
+            .offset(x: -8, y: 8)
+    }
+}
+
+// MARK: - Stats Card With Press State
+
+struct StatsCardView: View {
+    let stat: UserProfileView.UserStat
+    let onTap: () -> Void
+    let formatNumber: (Int) -> String
+    
+    @State private var isPressed = false
+    
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 12) {
+                // Icon with background
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [stat.color.opacity(0.15), stat.color.opacity(0.05)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 50, height: 50)
+                    
+                    Image(systemName: stat.icon)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(stat.color)
+                }
+                
+                // Number and label
+                VStack(spacing: 4) {
+                    Text(formatNumber(stat.count))
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    
+                    Text(stat.label)
+                        .font(.system(size: 12, weight: .medium, design: .default))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.9)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 4)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(stat.color.opacity(0.1), lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+}
+
+// MARK: - Genre Legend Row With Press State
+
+struct GenreLegendRow: View {
+    let genre: UserProfileView.GenreData
+    let onTap: () -> Void
+    let genreColor: (String) -> Color
+    
+    @State private var isPressed = false
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                // Color indicator
+                Circle()
+                    .fill(genreColor(genre.name))
+                    .frame(width: 12, height: 12)
+                    .shadow(color: genreColor(genre.name).opacity(0.3), radius: 2, x: 0, y: 1)
+                
+                // Genre name
+                Text(genre.name.capitalized)
+                    .font(.system(size: 15, weight: .medium, design: .default))
+                    .foregroundColor(.primary)
+                
+                Spacer()
+                
+                // Percentage and count
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(Int(genre.percentage))%")
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundColor(.primary)
+                    
+                    Text("\(genre.count) logs")
+                        .font(.system(size: 11, weight: .medium, design: .default))
+                        .foregroundColor(.secondary)
+                }
+                
+                // Subtle chevron to indicate it's clickable
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: Color.black.opacity(0.03), radius: 4, x: 0, y: 2)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(genreColor(genre.name).opacity(0.2), lineWidth: 1)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
+    }
+}
+
+// MARK: - Artist Log List View
+struct ArtistLogListView: View {
+    let artistName: String
+    let logs: [MusicLog]
+    @Environment(\.dismiss) private var dismiss
+    
+    private var sortedLogs: [MusicLog] {
+        logs.sorted { $0.dateLogged > $1.dateLogged }
+    }
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                LazyVStack(spacing: 16) {
+                    ForEach(sortedLogs, id: \.id) { log in
+                        PopularLogRow(log: log, reposterNames: nil)
+                            .padding(.horizontal, 16)
+                    }
+                }
+                .padding(.vertical, 20)
+            }
+            .navigationTitle(artistName)
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .foregroundColor(.purple)
+                    .fontWeight(.semibold)
+                }
+            }
+            .background(Color(.systemGroupedBackground))
+        }
+    }
+}
+

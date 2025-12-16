@@ -371,6 +371,28 @@ class AIGenreClassificationService: ObservableObject {
     
     /// Classify a song when user is logging music (real-time)
     func classifyForMusicLog(searchResult: MusicSearchResult) async -> ClassificationResult {
+        
+        // Route to appropriate classification method based on item type
+        switch searchResult.itemType.lowercased() {
+        case "song":
+            return await classifySongItem(searchResult: searchResult)
+            
+        case "album":
+            return await classifyAlbumItem(searchResult: searchResult)
+            
+        case "artist":
+            return await classifyArtistItem(searchResult: searchResult)
+            
+        default:
+            print("⚠️ Unknown item type: \(searchResult.itemType), defaulting to song classification")
+            return await classifySongItem(searchResult: searchResult)
+        }
+    }
+    
+    // MARK: - Item Type Specific Classification
+    
+    /// Classify a song using Apple Music genres + AI mapping
+    private func classifySongItem(searchResult: MusicSearchResult) async -> ClassificationResult {
         var genres = searchResult.genreNames ?? []
         // Treat ultra-generic labels as empty
         genres.removeAll { ["Music", "music", "Unknown"].contains($0) }
@@ -387,6 +409,27 @@ class AIGenreClassificationService: ObservableObject {
             title: searchResult.title,
             artist: searchResult.artistName,
             appleMusicGenres: genres
+        )
+    }
+    
+    /// Classify an album using song-based consensus
+    private func classifyAlbumItem(searchResult: MusicSearchResult) async -> ClassificationResult {
+        print("🎯 Routing album '\(searchResult.title)' to song-based classification")
+        
+        return await SongBasedGenreAggregationService.shared.classifyAlbumGenre(
+            albumId: searchResult.id,
+            albumTitle: searchResult.title,
+            artistName: searchResult.artistName
+        )
+    }
+    
+    /// Classify an artist using song-based consensus
+    private func classifyArtistItem(searchResult: MusicSearchResult) async -> ClassificationResult {
+        print("🎯 Routing artist '\(searchResult.title)' to song-based classification")
+        
+        return await SongBasedGenreAggregationService.shared.classifyArtistGenre(
+            artistId: searchResult.id,
+            artistName: searchResult.artistName
         )
     }
 

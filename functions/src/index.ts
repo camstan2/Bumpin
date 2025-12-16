@@ -4,6 +4,7 @@ import { runTrendingUpdateOnce } from './trendingScheduler';
 import { runWeeklyMatchmaking } from './matchmakingScheduler';
 import express = require('express');
 import { AccessToken } from 'livekit-server-sdk';
+import * as spotifyAuth from './spotifyAuth';
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -214,4 +215,31 @@ export const triggerMatchmaking = functions.https.onCall(async (data, context) =
     throw new functions.https.HttpsError('internal', error instanceof Error ? error.message : 'Unknown error');
   }
 });
+
+// ✅ Username availability callable function
+export const checkUsernameAvailable = functions.https.onCall(async (data, context) => {
+  const username = data.username;
+  if (!username || typeof username !== 'string' || username.length < 3) {
+    throw new functions.https.HttpsError('invalid-argument', 'A valid username must be provided.');
+  }
+
+  const usernameLower = username.trim().toLowerCase();
+  
+  const usersRef = db.collection('users');
+  const snapshot = await usersRef.where('username_lower', '==', usernameLower).limit(1).get();
+  
+  if (!snapshot.empty) {
+    // Username is taken
+    return { available: false };
+  } else {
+    // Username is available
+    return { available: true };
+  }
+});
+
+// Export Spotify authentication functions
+export const getSpotifyClientToken = spotifyAuth.getSpotifyClientToken;
+export const exchangeSpotifyCode = spotifyAuth.exchangeSpotifyCode;
+export const refreshSpotifyToken = spotifyAuth.refreshSpotifyToken;
+export const getSpotifyAuthUrl = spotifyAuth.getSpotifyAuthUrl;
 

@@ -158,8 +158,15 @@ final class PartyManager: ObservableObject {
     }
     
     private func setupBackgroundAudio() {
+        // Prevent multiple setup calls
+        guard !isAudioSessionActive else {
+            print("[PartyManager] Audio session already setup, skipping")
+            return
+        }
+        
         // Audio session setup is handled by MusicManager to avoid conflicts
         print("[PartyManager] Audio session setup deferred to MusicManager")
+        isAudioSessionActive = true
     }
     
     private func setupSyncNotifications() {

@@ -33,13 +33,14 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.triggerMatchmaking = exports.weeklyMusicMatchmaking = exports.trendingScheduler = exports.api = void 0;
+exports.getSpotifyAuthUrl = exports.refreshSpotifyToken = exports.exchangeSpotifyCode = exports.getSpotifyClientToken = exports.checkUsernameAvailable = exports.triggerMatchmaking = exports.weeklyMusicMatchmaking = exports.trendingScheduler = exports.api = void 0;
 const functions = __importStar(require("firebase-functions/v1"));
 const admin = __importStar(require("firebase-admin"));
 const trendingScheduler_1 = require("./trendingScheduler");
 const matchmakingScheduler_1 = require("./matchmakingScheduler");
 const express = require("express");
 const livekit_server_sdk_1 = require("livekit-server-sdk");
+const spotifyAuth = __importStar(require("./spotifyAuth"));
 admin.initializeApp();
 const db = admin.firestore();
 // Config via env (set with: firebase functions:config:set livekit.url=... livekit.key=... livekit.secret=...)
@@ -242,3 +243,26 @@ exports.triggerMatchmaking = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('internal', error instanceof Error ? error.message : 'Unknown error');
     }
 });
+// ✅ Username availability callable function
+exports.checkUsernameAvailable = functions.https.onCall(async (data, context) => {
+    const username = data.username;
+    if (!username || typeof username !== 'string' || username.length < 3) {
+        throw new functions.https.HttpsError('invalid-argument', 'A valid username must be provided.');
+    }
+    const usernameLower = username.trim().toLowerCase();
+    const usersRef = db.collection('users');
+    const snapshot = await usersRef.where('username_lower', '==', usernameLower).limit(1).get();
+    if (!snapshot.empty) {
+        // Username is taken
+        return { available: false };
+    }
+    else {
+        // Username is available
+        return { available: true };
+    }
+});
+// Export Spotify authentication functions
+exports.getSpotifyClientToken = spotifyAuth.getSpotifyClientToken;
+exports.exchangeSpotifyCode = spotifyAuth.exchangeSpotifyCode;
+exports.refreshSpotifyToken = spotifyAuth.refreshSpotifyToken;
+exports.getSpotifyAuthUrl = spotifyAuth.getSpotifyAuthUrl;

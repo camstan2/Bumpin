@@ -1,5 +1,6 @@
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct DailyPromptTabView: View {
     @StateObject private var coordinator = DailyPromptCoordinator()
@@ -7,8 +8,9 @@ struct DailyPromptTabView: View {
     @State private var showResponseSubmission = false
     @State private var showLeaderboard = false
     @State private var showPromptHistory = false
+    // Selected items drive detail sheets
     @State private var selectedResponse: PromptResponse?
-    @State private var showResponseDetail = false
+    @State private var selectedPromptDetail: DailyPrompt?
     
     // New state for enhanced sections
     @State private var showAllTopSongs = false
@@ -35,34 +37,35 @@ struct DailyPromptTabView: View {
                 headerSection
                 
                 // Main prompt card
-                if let prompt = coordinator.currentPrompt {
-                    currentPromptSection(prompt)
+                if coordinator.isPromptLoading {
+                    promptLoadingSection
+                } else if let prompt = coordinator.currentPrompt {
+                    currentPromptSection(prompt, isResponseLoading: coordinator.isUserResponseLoading)
                 } else {
                     noActivePromptSection
                 }
                 
                 // User's response (if submitted)
-                if let userResponse = coordinator.currentUserResponse {
+                if coordinator.isUserResponseLoading {
+                    userResponseLoadingSection
+                } else if let userResponse = coordinator.currentUserResponse {
                     userResponseSection(userResponse)
                 }
                 
                 // Only show enhanced sections if user has responded
-                if coordinator.hasRespondedToCurrentPrompt {
+                if coordinator.hasRespondedToCurrentPrompt && !coordinator.isUserResponseLoading {
                     // Top Songs section
                     topSongsSection
                     
                     // Top Responses section  
                     topResponsesSection
                     
-                    // Enhanced Friends' Responses section
+                    // Enhanced Friend Responses section
                     enhancedFriendsResponsesSection
                     
                     // Recent Prompts section
                     recentPromptsSection
                 }
-                
-                // Quick stats section (moved to bottom)
-                userStatsSection
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 100) // Extra padding for tab bar
@@ -75,6 +78,12 @@ struct DailyPromptTabView: View {
             coordinator.trackPromptEngagement("tab_viewed")
             loadEnhancedSectionData()
         }
+        .onChange(of: coordinator.currentPrompt?.id) { _ in
+            loadEnhancedSectionData()
+        }
+        .onChange(of: coordinator.currentUserResponse?.id) { _ in
+            loadEnhancedSectionData()
+        }
         .fullScreenCover(isPresented: $showResponseSubmission) {
             PromptResponseSubmissionView(coordinator: coordinator)
                 .environmentObject(navigationCoordinator)
@@ -84,31 +93,39 @@ struct DailyPromptTabView: View {
                 PromptLeaderboardView(prompt: prompt, coordinator: coordinator)
             }
         }
-        .sheet(isPresented: $showPromptHistory) {
+        .fullScreenCover(isPresented: $showPromptHistory) {
             PromptHistoryView(coordinator: coordinator)
+                .environmentObject(navigationCoordinator)
         }
-        .sheet(isPresented: $showResponseDetail) {
-            if let response = selectedResponse {
+        .fullScreenCover(item: $selectedResponse) { response in
                 PromptResponseDetailView(response: response, coordinator: coordinator)
+                .environmentObject(navigationCoordinator)
             }
+        .fullScreenCover(item: $selectedPromptDetail) { prompt in
+            PromptDetailView(prompt: prompt, coordinator: coordinator)
+                .environmentObject(navigationCoordinator)
         }
-        .sheet(isPresented: $showAllTopSongs) {
+        .fullScreenCover(isPresented: $showAllTopSongs) {
             if let prompt = coordinator.currentPrompt {
-                AllSongsView(prompt: prompt, coordinator: coordinator)
+                AllTopSongsView(prompt: prompt, coordinator: coordinator)
+                    .environmentObject(navigationCoordinator)
             }
         }
-        .sheet(isPresented: $showAllTopResponses) {
+        .fullScreenCover(isPresented: $showAllTopResponses) {
             if let prompt = coordinator.currentPrompt {
-                AllPopularResponsesView(prompt: prompt, coordinator: coordinator)
+                AllTopResponsesView(prompt: prompt, coordinator: coordinator)
+                    .environmentObject(navigationCoordinator)
             }
         }
-        .sheet(isPresented: $showAllFriendsResponses) {
+        .fullScreenCover(isPresented: $showAllFriendsResponses) {
             if let prompt = coordinator.currentPrompt {
                 AllFriendResponsesView(prompt: prompt, coordinator: coordinator)
+                    .environmentObject(navigationCoordinator)
             }
         }
-        .sheet(isPresented: $showAllRecentPrompts) {
+        .fullScreenCover(isPresented: $showAllRecentPrompts) {
             PromptHistoryView(coordinator: coordinator)
+                .environmentObject(navigationCoordinator)
         }
     }
     
@@ -143,22 +160,12 @@ struct DailyPromptTabView: View {
     
     // MARK: - Current Prompt Section
     
-    private func currentPromptSection(_ prompt: DailyPrompt) -> some View {
+    private func currentPromptSection(_ prompt: DailyPrompt, isResponseLoading: Bool) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Category badge and response count
+            // Category badge
             HStack {
                 CategoryBadge(category: prompt.category)
-                
                 Spacer()
-                
-                HStack(spacing: 4) {
-                    Image(systemName: "person.2.fill")
-                        .font(.caption)
-                    Text("\(prompt.totalResponses)")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                }
-                .foregroundColor(.secondary)
             }
             
             // Prompt title and description
@@ -178,7 +185,18 @@ struct DailyPromptTabView: View {
             }
             
             // Action button
-            if coordinator.canRespondToCurrentPrompt {
+            if isResponseLoading {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Loading your response…")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Color.gray.opacity(0.1))
+                .foregroundColor(.secondary)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else if coordinator.canRespondToCurrentPrompt {
                 Button(action: {
                     showResponseSubmission = true
                     coordinator.trackPromptEngagement("response_button_tapped", promptId: prompt.id)
@@ -231,6 +249,45 @@ struct DailyPromptTabView: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(Color(.systemBackground))
                 .shadow(color: Color.primary.opacity(0.1), radius: 8, x: 0, y: 4)
+        )
+    }
+    
+    private var promptLoadingSection: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
+                .scaleEffect(1.2)
+            Text("Loading today’s prompt…")
+                .font(.headline)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(40)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(.systemBackground))
+                .shadow(color: Color.primary.opacity(0.1), radius: 8, x: 0, y: 4)
+        )
+    }
+    
+    private var userResponseLoadingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Checking your response…")
+                .font(.headline)
+                .fontWeight(.bold)
+            
+            ProgressView()
+                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.blue.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.blue.opacity(0.2), lineWidth: 1)
+                )
         )
     }
     
@@ -292,7 +349,6 @@ struct DailyPromptTabView: View {
                 showUserInfo: false,
                 onTap: {
                     selectedResponse = response
-                    showResponseDetail = true
                 }
             )
         }
@@ -305,39 +361,6 @@ struct DailyPromptTabView: View {
                         .stroke(Color.blue.opacity(0.2), lineWidth: 1)
                 )
         )
-    }
-    
-    // MARK: - User Stats Section
-    
-    private var userStatsSection: some View {
-        HStack(spacing: 20) {
-            PromptStatCard(
-                title: "Streak",
-                value: "\(coordinator.userStreak)",
-                subtitle: coordinator.userStreak == 1 ? "day" : "days",
-                color: .orange,
-                icon: "flame.fill"
-            )
-            
-            PromptStatCard(
-                title: "Total",
-                value: "\(coordinator.userTotalResponses)",
-                subtitle: coordinator.userTotalResponses == 1 ? "response" : "responses",
-                color: .purple,
-                icon: "music.note"
-            )
-            
-            if let stats = coordinator.getUserStats(),
-               stats.longestStreak > 0 {
-                PromptStatCard(
-                    title: "Best",
-                    value: "\(stats.longestStreak)",
-                    subtitle: stats.longestStreak == 1 ? "day" : "days",
-                    color: .green,
-                    icon: "crown.fill"
-                )
-            }
-        }
     }
     
     // MARK: - Top Songs Section
@@ -361,9 +384,24 @@ struct DailyPromptTabView: View {
             if let leaderboard = coordinator.getCurrentLeaderboard() {
                 let songsToShow = topSongsExpanded ? leaderboard.songRankings : Array(leaderboard.songRankings.prefix(5))
                 
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: 12) {
                     ForEach(Array(songsToShow.enumerated()), id: \.element.id) { index, ranking in
-                        LeaderboardRowPreview(ranking: ranking, rank: index + 1)
+                        Button(action: {
+                            navigationCoordinator.navigateToMusicProfile(
+                                TrendingItem(
+                                    title: ranking.songTitle,
+                                    subtitle: ranking.artistName,
+                                    artworkUrl: ranking.artworkUrl,
+                                    logCount: ranking.voteCount,
+                                    averageRating: nil,
+                                    itemType: "song",
+                                    itemId: ranking.id
+                                )
+                            )
+                        }) {
+                            SongRankingRow(ranking: ranking, rank: index + 1)
+                        }
+                        .buttonStyle(PlainButtonStyle())
                     }
                 }
                 
@@ -431,7 +469,6 @@ struct DailyPromptTabView: View {
                             showUserInfo: true,
                             onTap: {
                                 selectedResponse = response
-                                showResponseDetail = true
                             }
                         )
                     }
@@ -461,7 +498,7 @@ struct DailyPromptTabView: View {
     private var enhancedFriendsResponsesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Friends' Responses")
+                Text("Friend Responses")
                     .font(.headline)
                     .fontWeight(.bold)
                 
@@ -495,7 +532,6 @@ struct DailyPromptTabView: View {
                             showUserInfo: true,
                             onTap: {
                                 selectedResponse = response
-                                showResponseDetail = true
                             }
                         )
                     }
@@ -543,7 +579,8 @@ struct DailyPromptTabView: View {
             LazyVStack(spacing: 12) {
                 ForEach(promptsToShow, id: \.id) { prompt in
                     PromptHistoryCard(prompt: prompt) {
-                        coordinator.showPromptDetail(prompt)
+                        selectedPromptDetail = prompt
+                        coordinator.trackPromptEngagement("recent_prompt_tapped", promptId: prompt.id)
                     }
                 }
             }
@@ -604,14 +641,57 @@ struct DailyPromptTabView: View {
         isLoadingFriendResponses = true
         defer { isLoadingFriendResponses = false }
         
-        let allResponses = await coordinator.promptService.fetchResponsesForPrompt(promptId, limit: 100)
+        guard let currentUserId = Auth.auth().currentUser?.uid else {
+            print("❌ No current user for friend responses")
+            return
+        }
         
-        // Filter to only include friends (placeholder implementation)
-        // TODO: Implement actual friend filtering when friend system is available
-        let friendsOnly = allResponses
-        
-        await MainActor.run {
-            friendResponses = friendsOnly
+        do {
+            // Fetch user's following list from Firestore
+            let db = Firestore.firestore()
+            let followingSnapshot = try await db.collection("users")
+                .document(currentUserId)
+                .collection("following")
+                .getDocuments()
+            
+            let followingUserIds = Set(followingSnapshot.documents.map { $0.documentID })
+            
+            print("📊 [FriendResponses] Found \(followingUserIds.count) following users")
+            
+            // Fetch all responses for this prompt
+            let allResponses = await coordinator.promptService.fetchResponsesForPrompt(promptId, limit: 200)
+            
+            print("📊 [FriendResponses] Found \(allResponses.count) total responses")
+            
+            // Filter to only include responses from users we follow
+            let friendResponses = allResponses.filter { response in
+                followingUserIds.contains(response.userId)
+            }
+            
+            print("📊 [FriendResponses] Found \(friendResponses.count) friend responses")
+            
+            // Sort by engagement (likes + comments)
+            let sortedResponses = friendResponses.sorted { response1, response2 in
+                let engagement1 = response1.likeCount + response1.commentCount
+                let engagement2 = response2.likeCount + response2.commentCount
+                
+                // If engagement is equal, sort by likes
+                if engagement1 == engagement2 {
+                    return response1.likeCount > response2.likeCount
+                }
+                
+                return engagement1 > engagement2
+            }
+            
+            await MainActor.run {
+                self.friendResponses = sortedResponses
+            }
+            
+        } catch {
+            print("❌ [FriendResponses] Error loading: \(error)")
+            await MainActor.run {
+                self.friendResponses = []
+            }
         }
     }
     
@@ -760,47 +840,70 @@ struct FriendsResponsePreview: View {
 struct LeaderboardRowPreview: View {
     let ranking: SongRanking
     let rank: Int
+    let onTap: (() -> Void)?
+    
+    @State private var isPressed = false
+    
+    init(ranking: SongRanking, rank: Int, onTap: (() -> Void)? = nil) {
+        self.ranking = ranking
+        self.rank = rank
+        self.onTap = onTap
+    }
     
     var body: some View {
-        HStack(spacing: 12) {
-            Text("#\(rank)")
-                .font(.caption)
-                .fontWeight(.bold)
-                .foregroundColor(.secondary)
-                .frame(width: 30, alignment: .leading)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(ranking.songTitle)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .lineLimit(1)
-                
-                Text(ranking.artistName)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-            
-            Spacer()
-            
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(ranking.voteCount)")
+        Button(action: {
+            onTap?()
+        }) {
+            HStack(spacing: 12) {
+                Text("#\(rank)")
                     .font(.caption)
                     .fontWeight(.bold)
-                
-                Text("\(Int(ranking.percentage))%")
-                    .font(.caption2)
                     .foregroundColor(.secondary)
+                    .frame(width: 30, alignment: .leading)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ranking.songTitle)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                    
+                    Text(ranking.artistName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(ranking.voteCount)")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                    
+                    Text("\(Int(ranking.percentage))%")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .buttonStyle(PlainButtonStyle())
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
 }
 
 struct PromptHistoryCard: View {
     let prompt: DailyPrompt
     let onTap: () -> Void
+    
+    @State private var isPressed = false
     
     var body: some View {
         Button(action: onTap) {
@@ -821,11 +924,6 @@ struct PromptHistoryCard: View {
                 }
                 
                 Spacer()
-                
-                Text("\(prompt.totalResponses)")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(.purple)
             }
             .padding(12)
             .background(
@@ -834,6 +932,13 @@ struct PromptHistoryCard: View {
             )
         }
         .buttonStyle(PlainButtonStyle())
+        .scaleEffect(isPressed ? 0.98 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
     
     private func timeAgo(_ date: Date) -> String {

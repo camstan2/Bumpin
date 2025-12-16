@@ -15,7 +15,7 @@ SocialFeedView (Enhanced)
 │   ├── Current Prompt Display
 │   ├── User Response Section
 │   ├── Statistics Dashboard
-│   ├── Friends' Responses Preview
+│   ├── Friend Responses Preview
 │   ├── Leaderboard Preview
 │   └── Prompt History Preview
 └── Supporting Views

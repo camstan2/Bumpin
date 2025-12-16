@@ -16,11 +16,16 @@ struct HelpfulVoteButton: View {
                 HStack(spacing: 4) {
                     Image(systemName: userVote?.isHelpful == true ? "hand.thumbsup.fill" : "hand.thumbsup")
                         .foregroundColor(userVote?.isHelpful == true ? .green : .secondary)
+                        .symbolEffect(.bounce, value: userVote?.isHelpful == true)
                     Text("\(helpfulCount)")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .contentTransition(.numericText())
                 }
             }
+            .scaleEffect(userVote?.isHelpful == true ? 1.1 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: userVote?.isHelpful)
+            .animation(.smooth, value: helpfulCount)
             .disabled(isLoading)
             
             // Unhelpful button
@@ -28,11 +33,16 @@ struct HelpfulVoteButton: View {
                 HStack(spacing: 4) {
                     Image(systemName: userVote?.isHelpful == false ? "hand.thumbsdown.fill" : "hand.thumbsdown")
                         .foregroundColor(userVote?.isHelpful == false ? .red : .secondary)
+                        .symbolEffect(.bounce, value: userVote?.isHelpful == false)
                     Text("\(unhelpfulCount)")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .contentTransition(.numericText())
                 }
             }
+            .scaleEffect(userVote?.isHelpful == false ? 1.1 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: userVote?.isHelpful)
+            .animation(.smooth, value: unhelpfulCount)
             .disabled(isLoading)
         }
         .onAppear {
@@ -42,6 +52,10 @@ struct HelpfulVoteButton: View {
     
     private func voteHelpful() {
         guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        // Haptic feedback
+        LogEngagementHaptics.helpful()
+        
         isLoading = true
         
         ReviewHelpfulVote.updateVote(logId: logId, userId: userId, isHelpful: true) { error in
@@ -56,6 +70,10 @@ struct HelpfulVoteButton: View {
     
     private func voteUnhelpful() {
         guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        // Haptic feedback
+        LogEngagementHaptics.unhelpful()
+        
         isLoading = true
         
         ReviewHelpfulVote.updateVote(logId: logId, userId: userId, isHelpful: false) { error in

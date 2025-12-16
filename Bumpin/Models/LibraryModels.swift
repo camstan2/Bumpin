@@ -37,7 +37,7 @@ enum LibraryItemType: String, CaseIterable, Codable {
 }
 
 // MARK: - Library Item Model
-struct LibraryItem: Identifiable, Codable, Equatable {
+struct LibraryItem: Identifiable, Codable, Equatable, Hashable {
     let id: String
     let title: String
     let artistName: String
@@ -45,8 +45,16 @@ struct LibraryItem: Identifiable, Codable, Equatable {
     let artworkURL: String?
     let itemType: LibraryItemType
     let dateAdded: Date?
+    let platform: String? // e.g. "apple_music", "spotify", "local"
     
-    init(id: String, title: String, artistName: String, albumName: String? = nil, artworkURL: String? = nil, itemType: LibraryItemType, dateAdded: Date? = nil) {
+    init(id: String,
+         title: String,
+         artistName: String,
+         albumName: String? = nil,
+         artworkURL: String? = nil,
+         itemType: LibraryItemType,
+         dateAdded: Date? = nil,
+         platform: String? = nil) {
         self.id = id
         self.title = title
         self.artistName = artistName
@@ -54,6 +62,7 @@ struct LibraryItem: Identifiable, Codable, Equatable {
         self.artworkURL = artworkURL
         self.itemType = itemType
         self.dateAdded = dateAdded
+        self.platform = platform
     }
     
     // Convert to MusicSearchResult for compatibility with existing profile views
@@ -65,7 +74,10 @@ struct LibraryItem: Identifiable, Codable, Equatable {
             albumName: albumName ?? "",
             artworkURL: artworkURL,
             itemType: itemType.rawValue,
-            popularity: 0
+            popularity: 0,
+            genreNames: nil,
+            primaryGenre: nil,
+            platform: platform
         )
     }
 }

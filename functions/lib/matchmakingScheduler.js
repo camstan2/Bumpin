@@ -35,7 +35,12 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runWeeklyMatchmaking = runWeeklyMatchmaking;
 const admin = __importStar(require("firebase-admin"));
-const db = admin.firestore();
+function getDb() {
+    if (admin.apps.length === 0) {
+        admin.initializeApp();
+    }
+    return admin.firestore();
+}
 // Bot configuration
 const BOT_USER_ID = 'matchmaking_bot_system';
 const BOT_USERNAME = 'Bumpin Matchmaker';
@@ -91,7 +96,7 @@ async function runWeeklyMatchmaking() {
  * Get users who are eligible for matchmaking
  */
 async function getEligibleUsers() {
-    const query = db.collection('users')
+    const query = getDb().collection('users')
         .where('matchmakingOptIn', '==', true);
     const snapshot = await query.get();
     const users = [];
@@ -112,7 +117,7 @@ async function getEligibleUsers() {
 async function checkUserHasRecentMusicActivity(userId) {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const query = db.collection('logs')
+    const query = getDb().collection('logs')
         .where('userId', '==', userId)
         .where('dateLogged', '>', admin.firestore.Timestamp.fromDate(thirtyDaysAgo))
         .limit(1);
@@ -123,7 +128,7 @@ async function checkUserHasRecentMusicActivity(userId) {
  * Check if user has minimum number of music logs
  */
 async function checkUserHasMinimumLogs(userId, minimum) {
-    const query = db.collection('logs')
+    const query = getDb().collection('logs')
         .where('userId', '==', userId)
         .limit(minimum);
     const snapshot = await query.get();
@@ -152,7 +157,7 @@ async function loadMusicProfiles(users) {
  */
 async function getUserMusicProfile(userId) {
     try {
-        const query = db.collection('logs')
+        const query = getDb().collection('logs')
             .where('userId', '==', userId)
             .where('isPublic', 'in', [true, null]) // Only public logs for matchmaking
             .orderBy('dateLogged', 'desc')
@@ -390,9 +395,9 @@ async function applyMatchingAlgorithm(similarityResults, week) {
         matchedUserIds.add(user2.uid);
     }
     // Save matches to database
-    const batch = db.batch();
+    const batch = getDb().batch();
     for (const match of finalMatches) {
-        const docRef = db.collection('weeklyMatches').doc(match.id);
+        const docRef = getDb().collection('weeklyMatches').doc(match.id);
         batch.set(docRef, match);
     }
     await batch.commit();
@@ -404,7 +409,7 @@ async function applyMatchingAlgorithm(similarityResults, week) {
 async function getPreviousMatches(weeks) {
     const weeksAgo = new Date();
     weeksAgo.setDate(weeksAgo.getDate() - (weeks * 7));
-    const query = db.collection('weeklyMatches')
+    const query = getDb().collection('weeklyMatches')
         .where('timestamp', '>', admin.firestore.Timestamp.fromDate(weeksAgo));
     const snapshot = await query.get();
     return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -417,7 +422,7 @@ async function sendMatchingMessages(matches, users) {
     const userMap = new Map(users.map(user => [user.uid, user]));
     // Get unique matches (each pair is stored twice)
     const uniqueMatches = matches.filter((match, index, array) => array.findIndex(m => m.userId === match.userId) === index);
-    const batch = db.batch();
+    const batch = getDb().batch();
     for (const match of uniqueMatches) {
         const matchedUser = userMap.get(match.matchedUserId);
         if (!matchedUser)
@@ -428,7 +433,7 @@ async function sendMatchingMessages(matches, users) {
             // Generate personalized message
             const message = generateMatchMessage(matchedUser, match.sharedArtists);
             // Create bot message
-            const messageId = db.collection('conversations').doc().id;
+            const messageId = getDb().collection('conversations').doc().id;
             const botMessage = {
                 id: messageId,
                 conversationId,
@@ -449,16 +454,16 @@ async function sendMatchingMessages(matches, users) {
                 }
             };
             // Add message to batch
-            const messageRef = db.collection('conversations').doc(conversationId).collection('messages').doc(messageId);
+            const messageRef = getDb().collection('conversations').doc(conversationId).collection('messages').doc(messageId);
             batch.set(messageRef, botMessage);
             // Update conversation metadata
-            const conversationRef = db.collection('conversations').doc(conversationId);
+            const conversationRef = getDb().collection('conversations').doc(conversationId);
             batch.update(conversationRef, {
                 lastMessage: message,
                 lastTimestamp: admin.firestore.FieldValue.serverTimestamp()
             });
             // Mark match as message sent
-            const matchRef = db.collection('weeklyMatches').doc(match.id);
+            const matchRef = getDb().collection('weeklyMatches').doc(match.id);
             batch.update(matchRef, { botMessageSent: true });
         }
         catch (error) {
@@ -473,7 +478,7 @@ async function sendMatchingMessages(matches, users) {
 async function getOrCreateBotConversation(userId) {
     const participantKey = [BOT_USER_ID, userId].sort().join('_');
     // Check if conversation exists
-    const query = db.collection('conversations')
+    const query = getDb().collection('conversations')
         .where('participantKey', '==', participantKey)
         .limit(1);
     const snapshot = await query.get();
@@ -481,7 +486,7 @@ async function getOrCreateBotConversation(userId) {
         return snapshot.docs[0].id;
     }
     // Create new conversation
-    const conversationId = db.collection('conversations').doc().id;
+    const conversationId = getDb().collection('conversations').doc().id;
     const conversation = {
         id: conversationId,
         participantIds: [BOT_USER_ID, userId],
@@ -493,7 +498,7 @@ async function getOrCreateBotConversation(userId) {
         lastReadAtByUser: {},
         conversationType: 'bot'
     };
-    await db.collection('conversations').doc(conversationId).set(conversation);
+    await getDb().collection('conversations').doc(conversationId).set(conversation);
     return conversationId;
 }
 /**
@@ -564,7 +569,7 @@ function generateWeeklyStats(matches, totalEligibleUsers, processingTime, week) 
  */
 async function saveWeeklyStats(stats) {
     try {
-        await db.collection('matchmakingStats').doc(stats.week).set(stats);
+        await getDb().collection('matchmakingStats').doc(stats.week).set(stats);
         console.log('✅ Saved weekly matchmaking statistics');
     }
     catch (error) {

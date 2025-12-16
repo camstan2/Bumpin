@@ -69,6 +69,7 @@ class DJStreamService: NSObject, ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var audioSession: AVAudioSession?
     private var streamBuffer: AVAudioPCMBuffer?
+    private var isAudioSessionActive = false
     
     // MARK: - Firebase Properties
     
@@ -83,7 +84,7 @@ class DJStreamService: NSObject, ObservableObject {
     
     override init() {
         super.init()
-        setupAudioSession()
+        // Don't activate audio session until DJ stream actually starts
     }
     
     deinit {
@@ -96,18 +97,33 @@ class DJStreamService: NSObject, ObservableObject {
     
     // MARK: - Audio Session Setup
     
-    private func setupAudioSession() {
+    private func activateAudioSession() {
+        guard !isAudioSessionActive else { return }
+        
         audioSession = AVAudioSession.sharedInstance()
         
         do {
             // Configure for recording and playback
             try audioSession?.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
             try audioSession?.setActive(true)
+            isAudioSessionActive = true
             
             print("✅ DJ Audio session configured successfully")
         } catch {
             print("❌ DJ Audio session setup failed: \(error)")
             errorMessage = "Audio setup failed: \(error.localizedDescription)"
+        }
+    }
+    
+    private func deactivateAudioSession() {
+        guard isAudioSessionActive else { return }
+        
+        do {
+            try audioSession?.setActive(false, options: .notifyOthersOnDeactivation)
+            isAudioSessionActive = false
+            print("✅ DJ Audio session deactivated")
+        } catch {
+            print("❌ Failed to deactivate DJ audio session: \(error)")
         }
     }
     
@@ -119,16 +135,21 @@ class DJStreamService: NSObject, ObservableObject {
             return false
         }
         
+        // Activate audio session when starting stream
+        activateAudioSession()
+        
         // Request microphone permission
         let permissionGranted = await requestMicrophonePermission()
         guard permissionGranted else {
             errorMessage = "Microphone permission required for DJ streaming"
+            deactivateAudioSession()
             return false
         }
         
         // Setup audio engine
         guard setupAudioEngine() else {
             errorMessage = "Failed to setup audio engine"
+            deactivateAudioSession()
             return false
         }
         
@@ -167,6 +188,9 @@ class DJStreamService: NSObject, ObservableObject {
                 await endStreamInFirebase(streamId: streamId)
             }
         }
+        
+        // Deactivate audio session when stream stops
+        deactivateAudioSession()
         
         isStreaming = false
         currentStreamId = nil

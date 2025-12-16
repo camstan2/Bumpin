@@ -9,8 +9,12 @@ struct ProfileHeaderComponent: View {
     let artworkURL: String?
     let averageRating: Double
     let totalRatings: Int
+    let totalLogs: Int // Total number of logs
     let onActionTapped: () -> Void
     let crossPlatformInfo: String? // Cross-platform popularity info
+    let itemId: String // For deep links
+    let platform: String? // "apple_music", "spotify", etc.
+    let onSubtitleTapped: (() -> Void)?
     
     // Convenience initializer for backwards compatibility
     init(
@@ -20,8 +24,12 @@ struct ProfileHeaderComponent: View {
         artworkURL: String?,
         averageRating: Double,
         totalRatings: Int,
+        totalLogs: Int = 0,
         onActionTapped: @escaping () -> Void,
-        crossPlatformInfo: String? = nil
+        crossPlatformInfo: String? = nil,
+        itemId: String = "",
+        platform: String? = nil,
+        onSubtitleTapped: (() -> Void)? = nil
     ) {
         self.title = title
         self.subtitle = subtitle
@@ -29,8 +37,12 @@ struct ProfileHeaderComponent: View {
         self.artworkURL = artworkURL
         self.averageRating = averageRating
         self.totalRatings = totalRatings
+        self.totalLogs = totalLogs
         self.onActionTapped = onActionTapped
         self.crossPlatformInfo = crossPlatformInfo
+        self.itemId = itemId
+        self.platform = platform
+        self.onSubtitleTapped = onSubtitleTapped
     }
     
     @State private var isActionLoading = false
@@ -48,7 +60,7 @@ struct ProfileHeaderComponent: View {
                 )
                 
                 // Content
-                VStack(alignment: .leading, spacing: ProfileDesignSystem.Spacing.md) {
+                VStack(alignment: .leading, spacing: ProfileDesignSystem.Spacing.sm) {
                     // Item type badge
                     ProfileItemTypeBadge(itemType: itemType)
                     
@@ -61,53 +73,32 @@ struct ProfileHeaderComponent: View {
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                         
+                        // Artist name as clickable button (only for songs and albums)
+                        if itemType.lowercased() == "song" || itemType.lowercased() == "album" {
+                            if let onSubtitleTapped = onSubtitleTapped {
+                                Button(action: onSubtitleTapped) {
+                                    Text(subtitle)
+                                        .font(ProfileDesignSystem.Typography.bodyLarge)
+                                        .foregroundColor(.purple)
+                                        .lineLimit(1)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            } else {
+                                Text(subtitle)
+                                    .font(ProfileDesignSystem.Typography.bodyLarge)
+                                    .foregroundColor(.purple)
+                                    .lineLimit(1)
+                            }
+                        } else {
                         Text(subtitle)
                             .font(ProfileDesignSystem.Typography.bodyLarge)
                             .foregroundColor(ProfileDesignSystem.Colors.textSecondary)
                             .lineLimit(1)
-                    }
-                    
-                    // Quick stats
-                    if totalRatings > 0 {
-                        HStack(spacing: ProfileDesignSystem.Spacing.md) {
-                            ProfileQuickStat(
-                                icon: "star.fill",
-                                value: String(format: "%.1f", averageRating),
-                                label: "Rating",
-                                color: ProfileDesignSystem.Colors.ratingGold
-                            )
-                            
-                            ProfileQuickStat(
-                                icon: "person.2",
-                                value: "\(totalRatings)",
-                                label: "Reviews",
-                                color: ProfileDesignSystem.Colors.info
-                            )
                         }
                     }
                 }
                 
                 Spacer()
-            }
-            
-            // Cross-platform info (if available)
-            if let crossPlatformInfo = crossPlatformInfo {
-                HStack(spacing: 8) {
-                    Image(systemName: "link.circle.fill")
-                        .foregroundColor(.blue)
-                        .font(.caption)
-                    
-                    Text(crossPlatformInfo)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.blue.opacity(0.1))
-                )
             }
             
             // Action button
@@ -151,9 +142,31 @@ struct ProfileHeaderComponent: View {
                         .fill(ProfileDesignSystem.Colors.primary.gradient)
                 )
             }
+            .buttonStyle(ScaleButtonStyle())
             .disabled(isActionLoading)
-            .scaleEffect(isActionLoading ? 0.98 : 1.0)
-            .animation(.spring(response: 0.2, dampingFraction: 0.8), value: isActionLoading)
+            
+            // Listen On Platform Buttons
+            if !itemId.isEmpty {
+                ListenOnPlatformButtons(
+                    itemId: itemId,
+                    itemType: itemType,
+                    platform: platform,
+                    artistName: itemType == "artist" ? title : subtitle,
+                    songTitle: itemType != "artist" ? title : nil
+                )
+            }
+            
+            // Preview Player Button (only for songs)
+            if itemType.lowercased() == "song" && !itemId.isEmpty {
+                PreviewPlayerButton(
+                    itemId: itemId,
+                    itemType: itemType,
+                    platform: platform,
+                    songTitle: title,
+                    artistName: subtitle,
+                    artworkURL: artworkURL
+                )
+            }
         }
         .padding(ProfileDesignSystem.Spacing.cardPadding)
         .profileCard(elevation: ProfileDesignSystem.Shadows.large)
@@ -168,6 +181,8 @@ struct ProfileSectionHeader: View {
     let icon: String?
     let action: (() -> Void)?
     let actionTitle: String?
+    
+    @State private var hasAppeared = false
     
     init(title: String, subtitle: String? = nil, icon: String? = nil, action: (() -> Void)? = nil, actionTitle: String? = nil) {
         self.title = title
@@ -184,6 +199,8 @@ struct ProfileSectionHeader: View {
                     Image(systemName: icon)
                         .font(ProfileDesignSystem.Typography.headlineSmall)
                         .foregroundColor(ProfileDesignSystem.Colors.primary)
+                        .scaleEffect(hasAppeared ? 1.0 : 0.8)
+                        .opacity(hasAppeared ? 1.0 : 0.0)
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
@@ -198,6 +215,8 @@ struct ProfileSectionHeader: View {
                             .foregroundColor(ProfileDesignSystem.Colors.textSecondary)
                     }
                 }
+                .offset(x: hasAppeared ? 0 : -10)
+                .opacity(hasAppeared ? 1.0 : 0.0)
             }
             
             Spacer()
@@ -214,8 +233,14 @@ struct ProfileSectionHeader: View {
                 }
             }
         }
+        .onAppear {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.1)) {
+                hasAppeared = true
+            }
+        }
     }
 }
+
 
 #Preview {
     VStack(spacing: 30) {

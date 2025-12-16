@@ -1,0 +1,67 @@
+rules_version = '2';
+
+// Firebase Storage Rules for Bumpin
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Helper function: Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function: Check if user owns the resource
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    // User Profile Pictures
+    // Path: users/{userId}/profile/profile.jpg
+    match /users/{userId}/profile/{fileName} {
+      // Allow read by anyone (public profiles)
+      allow read: if true;
+      
+      // Allow write (upload/update/delete) only by the owner
+      allow write: if isAuthenticated() && isOwner(userId);
+    }
+    
+    // User Media/Content
+    // Path: users/{userId}/media/{fileName}
+    match /users/{userId}/media/{fileName} {
+      // Allow read by anyone
+      allow read: if true;
+      
+      // Allow write only by the owner
+      allow write: if isAuthenticated() && isOwner(userId);
+    }
+    
+    // Legacy profile_pictures path (for backward compatibility)
+    // Path: profile_pictures/{userId}.jpg
+    match /profile_pictures/{userId}.jpg {
+      // Allow read by anyone
+      allow read: if true;
+      
+      // Allow write only by the owner
+      allow write: if isAuthenticated() && isOwner(userId);
+    }
+    
+    // DJ Stream Media
+    // Path: dj_streams/{streamId}/{fileName}
+    match /dj_streams/{streamId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated(); // Could add DJ-specific checks
+    }
+    
+    // Party Media
+    // Path: parties/{partyId}/{fileName}
+    match /parties/{partyId}/{fileName} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated(); // Could add host-specific checks
+    }
+    
+    // Deny all other paths by default
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

@@ -9,6 +9,9 @@ struct DirectMessage: Identifiable, Codable {
     var createdAt: Date
     var isSystem: Bool?
     var readBy: [String]? // uids that have read this message
+    var attachments: [MessageAttachment]?
+    var replyToMessageId: String?
+    var status: MessageDeliveryStatus?
     
     // MARK: - Bot & Matchmaking Support
     var messageType: MessageType?
@@ -21,6 +24,27 @@ struct DirectMessage: Identifiable, Codable {
         case botWelcome = "bot_welcome"
         case botReminder = "bot_reminder"
     }
+}
+
+struct MessageAttachment: Codable, Identifiable {
+    enum AttachmentType: String, Codable {
+        case audio
+        case link
+        case image
+    }
+    
+    let id: String
+    let type: AttachmentType
+    let url: String
+    let thumbnailUrl: String?
+    let metadata: [String: String]?
+}
+
+enum MessageDeliveryStatus: String, Codable {
+    case sending
+    case sent
+    case delivered
+    case read
 }
 
 struct MatchmakingMessageData: Codable {
@@ -38,18 +62,27 @@ struct Conversation: Identifiable, Codable, Equatable {
     var id: String
     var participantIds: [String]
     var participantKey: String
+    var participantCount: Int?
+    var createdBy: String?
+    var groupName: String?
+    var groupAvatarUrl: String?
     var inboxFor: [String]
     var requestFor: [String]
     var lastMessage: String?
+    var lastSenderId: String?
     var lastTimestamp: Date?
     var lastReadAtByUser: [String: Date]?
+    var conversationType: ConversationType?
+    
+    var isGroupConversation: Bool {
+        (conversationType == .group) || (participantIds.count > 2)
+    }
     
     // MARK: - Bot & Matchmaking Support
-    var conversationType: ConversationType?
-    var isBotConversation: Bool { 
-        participantIds.contains(MatchmakingBotService.botUserId) 
+    var isBotConversation: Bool {
+        participantIds.contains(MatchmakingBotService.botUserId)
     }
-
+    
     static func makeParticipantKey(_ ids: [String]) -> String {
         ids.sorted().joined(separator: "_")
     }
@@ -59,5 +92,6 @@ struct Conversation: Identifiable, Codable, Equatable {
         case bot = "bot"
         case matchmaking = "matchmaking"
         case system = "system"
+        case group = "group"
     }
 }

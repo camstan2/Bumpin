@@ -154,7 +154,7 @@ struct PlaylistsView: View {
                 PlaylistManagementSheet(libraryService: libraryService)
             }
         }
-        .sheet(item: $selectedPlaylist) { playlist in
+        .fullScreenCover(item: $selectedPlaylist) { playlist in
             PlaylistDetailView(
                 playlist: playlist,
                 libraryService: libraryService
@@ -178,6 +178,8 @@ struct PlaylistsView: View {
                 
                 TextField("Search playlists", text: $searchText)
                     .textFieldStyle(PlainTextFieldStyle())
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
                 
                 if !searchText.isEmpty {
                     Button(action: { searchText = "" }) {
@@ -372,8 +374,10 @@ struct PlaylistsView: View {
 struct PlaylistDetailView: View {
     let playlist: LibraryPlaylist
     @ObservedObject var libraryService: AppleMusicLibraryService
+    
     @State private var songs: [LibraryItem] = []
     @State private var isLoading = false
+    @State private var selectedSong: LibraryItem?
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -415,6 +419,12 @@ struct PlaylistDetailView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
+            }
+            .navigationDestination(item: $selectedSong) { song in
+                MusicProfileView(
+                    musicItem: song.toMusicSearchResult(),
+                    pinnedLog: nil
+                )
             }
         }
         .onAppear {
@@ -521,12 +531,7 @@ struct PlaylistDetailView: View {
     }
     
     private func handleSongTap(_ song: LibraryItem) {
-        // Navigate to song profile
-        let musicResult = song.toMusicSearchResult()
-        NotificationCenter.default.post(
-            name: NSNotification.Name("LibraryItemTapped"),
-            object: musicResult
-        )
+        selectedSong = song
     }
 }
 
@@ -716,6 +721,8 @@ struct PlaylistManagementSheet: View {
             
             TextField("Search playlists...", text: $searchText)
                 .textFieldStyle(PlainTextFieldStyle())
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

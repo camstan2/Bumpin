@@ -12,7 +12,7 @@ struct PromptResponseLike: Identifiable, Codable {
     let createdAt: Date
     
     init(responseId: String, promptId: String, userId: String, username: String) {
-        self.id = UUID().uuidString
+        self.id = "\(responseId)_\(userId)"
         self.responseId = responseId
         self.promptId = promptId
         self.userId = userId
@@ -75,59 +75,57 @@ struct PromptResponseCommentLike: Identifiable, Codable {
 
 extension PromptResponseLike {
     
-    static func createLike(_ like: PromptResponseLike, completion: ((Error?) -> Void)? = nil) {
+    /// Creates a like if one doesn't already exist for the user/response pair.
+    /// - Returns: `true` if a new like was created, `false` if it already existed.
+    static func createLike(_ like: PromptResponseLike) async throws -> Bool {
         let db = Firestore.firestore()
-        let batch = db.batch()
-        
-        // Add the like
         let likeRef = db.collection("promptResponseLikes").document(like.id)
-        do {
-            try batch.setData(from: like, forDocument: likeRef)
-        } catch {
-            completion?(error)
-            return
-        }
-        
-        // Increment like count on the response
         let responseRef = db.collection("promptResponses").document(like.responseId)
-        batch.updateData(["likeCount": FieldValue.increment(Int64(1))], forDocument: responseRef)
         
-        batch.commit { error in
-            completion?(error)
+        let result = try await db.runTransaction { transaction, errorPointer in
+            do {
+                let likeSnapshot = try transaction.getDocument(likeRef)
+                if likeSnapshot.exists {
+                    return false
+                }
+                
+                try transaction.setData(from: like, forDocument: likeRef)
+                transaction.updateData(["likeCount": FieldValue.increment(Int64(1))], forDocument: responseRef)
+                return true
+            } catch {
+                errorPointer?.pointee = error as NSError
+                return false
+            }
         }
+        
+        return (result as? Bool) ?? false
     }
     
-    static func deleteLike(responseId: String, userId: String, completion: ((Error?) -> Void)? = nil) {
+    /// Deletes an existing like for the user/response pair.
+    /// - Returns: `true` if a like was removed, `false` if none existed.
+    static func deleteLike(responseId: String, userId: String) async throws -> Bool {
         let db = Firestore.firestore()
+        let likeId = "\(responseId)_\(userId)"
+        let likeRef = db.collection("promptResponseLikes").document(likeId)
+        let responseRef = db.collection("promptResponses").document(responseId)
         
-        // First find the like
-        db.collection("promptResponseLikes")
-            .whereField("responseId", isEqualTo: responseId)
-            .whereField("userId", isEqualTo: userId)
-            .getDocuments { snapshot, error in
-                if let error = error {
-                    completion?(error)
-                    return
+        let result = try await db.runTransaction { transaction, errorPointer in
+            do {
+                let likeSnapshot = try transaction.getDocument(likeRef)
+                if !likeSnapshot.exists {
+                    return false
                 }
                 
-                guard let document = snapshot?.documents.first else {
-                    completion?(nil) // Like doesn't exist
-                    return
-                }
-                
-                let batch = db.batch()
-                
-                // Delete the like
-                batch.deleteDocument(document.reference)
-                
-                // Decrement like count on the response
-                let responseRef = db.collection("promptResponses").document(responseId)
-                batch.updateData(["likeCount": FieldValue.increment(Int64(-1))], forDocument: responseRef)
-                
-                batch.commit { error in
-                    completion?(error)
-                }
+                transaction.deleteDocument(likeRef)
+                transaction.updateData(["likeCount": FieldValue.increment(Int64(-1))], forDocument: responseRef)
+                return true
+            } catch {
+                errorPointer?.pointee = error as NSError
+                return false
             }
+        }
+        
+        return (result as? Bool) ?? false
     }
     
     static func checkUserLiked(responseId: String, userId: String, completion: @escaping (Bool, Error?) -> Void) {

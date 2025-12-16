@@ -40,25 +40,38 @@ class UnifiedLibraryService: ObservableObject {
     // MARK: - Main Library Loading
     
     func loadSpotifyLibrary() async {
+        print("🔍 [UnifiedLibraryService] loadSpotifyLibrary() called")
+        print("🔍 [UnifiedLibraryService] isUserAuthenticated: \(spotifyService.isUserAuthenticated)")
+        
         guard spotifyService.isUserAuthenticated else {
-            print("ℹ️ Spotify user not authenticated - using demo data")
-            loadDemoSpotifyLibrary()
+            print("ℹ️ Spotify user not authenticated - skipping library load (user not authenticated yet)")
             return
         }
         
-        isLoading = true
+        await MainActor.run {
+            isLoading = true
+        }
+        print("🔍 [UnifiedLibraryService] Started loading Spotify library...")
         
+        print("🔍 [UnifiedLibraryService] Fetching playlists...")
         let playlists = await spotifyService.getUserPlaylists()
+        print("🔍 [UnifiedLibraryService] Fetched \(playlists.count) playlists")
+        
+        print("🔍 [UnifiedLibraryService] Fetching saved tracks...")
         let savedTracks = await spotifyService.getSavedTracks()
+        print("🔍 [UnifiedLibraryService] Fetched \(savedTracks.count) saved tracks")
         
-        spotifyLibraryData = SpotifyLibraryData(
-            savedTracks: savedTracks,
-            playlists: playlists,
-            isLoaded: true
-        )
+        await MainActor.run {
+            spotifyLibraryData = SpotifyLibraryData(
+                savedTracks: savedTracks,
+                playlists: playlists,
+                isLoaded: true
+            )
+            isLoading = false
+        }
         
-        isLoading = false
-        print("🎵 Spotify library loaded: \(savedTracks.count) saved tracks, \(playlists.count) playlists")
+        print("✅ [UnifiedLibraryService] Spotify library loaded: \(savedTracks.count) saved tracks, \(playlists.count) playlists")
+        print("🔍 [UnifiedLibraryService] spotifyLibraryData.savedTracks.count = \(spotifyLibraryData.savedTracks.count)")
     }
     
     private func loadDemoSpotifyLibrary() {
@@ -88,7 +101,10 @@ class UnifiedLibraryService: ObservableObject {
     }
     
     func getSpotifySavedTracks() -> [MusicSearchResult] {
-        return spotifyLibraryData.savedTracks.map { track in
+        print("🔍 [UnifiedLibraryService] getSpotifySavedTracks() called")
+        print("🔍 [UnifiedLibraryService] spotifyLibraryData.savedTracks.count = \(spotifyLibraryData.savedTracks.count)")
+        
+        let results = spotifyLibraryData.savedTracks.map { track in
             MusicSearchResult(
                 id: track.id,
                 title: track.name,
@@ -96,9 +112,19 @@ class UnifiedLibraryService: ObservableObject {
                 albumName: track.album.name,
                 artworkURL: track.album.images.first?.url,
                 itemType: "song",
-                popularity: track.popularity
+                popularity: track.popularity,
+                genreNames: nil,
+                primaryGenre: nil,
+                platform: "spotify"
             )
         }
+        
+        print("🔍 [UnifiedLibraryService] Returning \(results.count) saved tracks")
+        if results.count > 0 {
+            print("🔍 [UnifiedLibraryService] First track: \(results[0].title) by \(results[0].artistName)")
+        }
+        
+        return results
     }
     
     // MARK: - Library Stats

@@ -5,7 +5,7 @@ import FirebaseAuth
 struct EditLogView: View {
     let log: MusicLog
     @Environment(\.presentationMode) var presentationMode
-    @State private var rating: Int
+    @State private var rating: Double
     @State private var review: String
     @State private var isSaving = false
     @State private var errorMessage: String?
@@ -22,7 +22,7 @@ struct EditLogView: View {
         self.onSave = onSave
         
         // Initialize state with existing log data
-        self._rating = State(initialValue: log.rating ?? 0)
+        self._rating = State(initialValue: log.rating ?? 0.0)
         self._review = State(initialValue: log.review ?? "")
         self._isLiked = State(initialValue: log.isLiked ?? false)
         self._isReposted = State(initialValue: log.thumbsUp ?? false) // Map thumbsUp to repost
@@ -101,31 +101,7 @@ struct EditLogView: View {
                             .font(.headline)
                             .fontWeight(.semibold)
                         
-                        HStack(spacing: 12) {
-                            ForEach(1...5, id: \.self) { star in
-                                Button(action: {
-                                    withAnimation(.easeInOut(duration: 0.1)) {
-                                        rating = star
-                                    }
-                                }) {
-                                    Image(systemName: star <= rating ? "star.fill" : "star")
-                                        .font(.system(size: 32))
-                                        .foregroundColor(star <= rating ? .yellow : .gray.opacity(0.3))
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                                .scaleEffect(star <= rating ? 1.1 : 1.0)
-                                .animation(.easeInOut(duration: 0.1), value: rating)
-                            }
-                            
-                            Spacer()
-                        }
-                        
-                        if rating > 0 {
-                            Text("\(rating) star\(rating == 1 ? "" : "s")")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .padding(.top, 4)
-                        }
+                        PreciseStarRatingView(rating: $rating)
                     }
                     .padding(.horizontal, 20)
                     
@@ -362,6 +338,10 @@ struct EditLogView: View {
         }
         
         // Create updated log with current timestamp for edited logs
+        // Reconstruct genres array from primaryGenre or userCorrectedGenre
+        let effectiveGenre = log.userCorrectedGenre ?? log.primaryGenre
+        let genresArray: [String]? = effectiveGenre.map { [$0] } ?? log.genres
+        
         let updatedLog = MusicLog(
             id: log.id,
             userId: userId,
@@ -371,7 +351,7 @@ struct EditLogView: View {
             artistName: log.artistName,
             artworkUrl: log.artworkUrl,
             dateLogged: Date(), // Update timestamp to current time when edited
-            rating: rating == 0 ? nil : rating,
+            rating: rating < 1.0 ? nil : rating,
             review: review.isEmpty ? nil : review,
             notes: log.notes,
             commentCount: log.commentCount,
@@ -383,7 +363,14 @@ struct EditLogView: View {
             thumbsDown: thumbsDown,
             isPublic: isPublic,
             appleMusicGenres: log.appleMusicGenres, // Preserve existing Apple Music genres
-            primaryGenre: log.primaryGenre // Preserve existing primary genre
+            primaryGenre: log.primaryGenre, // Preserve existing primary genre
+            genres: genresArray, // Update genres array for Firestore querying
+            userCorrectedGenre: log.userCorrectedGenre,
+            genreConfidenceScore: log.genreConfidenceScore,
+            classificationMethod: log.classificationMethod,
+            universalTrackId: log.universalTrackId,
+            musicPlatform: log.musicPlatform,
+            platformMatchingConfidence: log.platformMatchingConfidence
         )
         
         // Update in Firestore

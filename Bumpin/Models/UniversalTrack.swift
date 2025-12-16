@@ -249,6 +249,10 @@ extension UniversalTrack {
         let m = arr1.count
         let n = arr2.count
         
+        // Handle empty strings edge case
+        if m == 0 { return n }
+        if n == 0 { return m }
+        
         var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
         
         for i in 0...m {

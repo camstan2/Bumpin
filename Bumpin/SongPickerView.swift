@@ -1268,6 +1268,8 @@ struct SearchBar: UIViewRepresentable {
         searchBar.delegate = context.coordinator
         searchBar.placeholder = placeholder
         searchBar.searchBarStyle = .minimal
+        searchBar.autocorrectionType = .no
+        searchBar.autocapitalizationType = .none
         return searchBar
     }
     

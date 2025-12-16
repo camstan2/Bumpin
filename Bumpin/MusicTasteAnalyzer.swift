@@ -59,12 +59,13 @@ class MusicTasteAnalyzer: ObservableObject {
             
             // Calculate average rating
             let ratingsOnly = logs.compactMap { $0.rating }
-            self.averageRating = ratingsOnly.isEmpty ? 0.0 : Double(ratingsOnly.reduce(0, +)) / Double(ratingsOnly.count)
+            self.averageRating = ratingsOnly.isEmpty ? 0.0 : ratingsOnly.reduce(0.0, +) / Double(ratingsOnly.count)
             
-            // Calculate rating distribution
+            // Calculate rating distribution (rounded to nearest integer for grouping)
             var ratingDist: [Int: Int] = [:]
             for rating in ratingsOnly {
-                ratingDist[rating, default: 0] += 1
+                let roundedRating = Int(rating.rounded())
+                ratingDist[roundedRating, default: 0] += 1
             }
             self.ratingDistribution = ratingDist
             

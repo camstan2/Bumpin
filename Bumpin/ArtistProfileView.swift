@@ -103,7 +103,7 @@ struct ArtistProfileView: View {
                 backgroundGradient
                 
                 ScrollView {
-                    VStack(spacing: 32) { // Increased spacing for better visual hierarchy
+                    VStack(spacing: 8) { // Minimal spacing for tight layout between header and rating
                     // Artist header with loading states
                     if viewModel.loadingState == .loading {
                         ArtistHeaderSkeleton()
@@ -166,16 +166,17 @@ struct ArtistProfileView: View {
             }
             } // Close ZStack
             .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitle("")
+        .navigationBarBackButtonHidden(true)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(action: {
                         dismiss()
                     }) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .medium))
                             .foregroundColor(.primary)
+                        .font(.title2)
                     }
-                    .accessibilityLabel("Close artist profile")
                 }
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -192,6 +193,7 @@ struct ArtistProfileView: View {
                     .accessibilityLabel("Log this artist")
                 }
             }
+        .toolbarBackground(.visible, for: .navigationBar)
             .onAppear {
                 print("🎯 ArtistProfileView: Appeared for artist: \(artistName)")
                 Task {
@@ -205,7 +207,7 @@ struct ArtistProfileView: View {
                     await viewModel.refreshData()
                 }
             }
-        }
+    } // Close NavigationView
         .sheet(isPresented: $showingSortOptions) {
             sortOptionsSheet
         }
@@ -581,32 +583,82 @@ struct ArtistProfileView: View {
     }
     
     // MARK: - Artist Community Section
+    @State private var communityArtistLogs: [MusicLog] = []
+    @State private var isLoadingCommunityLogs: Bool = false
+    
     private var artistCommunitySection: some View {
         EnhancedSocialSection(
-            comments: [], // TODO: Load artist comments
-            userRatings: [:], // TODO: Load user ratings for artist songs
-            onLoadMoreComments: {
-                // Handle load more comments for artist
-                print("Load more artist comments")
-            },
-            onAddComment: {
-                // Handle add comment for artist
-                print("Add comment for artist")
-            },
-            onCommentLike: { comment in
-                print("Like artist comment from \(comment.username)")
-            },
-            onCommentRepost: { comment in
-                print("Repost artist comment from \(comment.username)")
-            },
-            onCommentReply: { comment in
-                print("Reply to artist comment from \(comment.username)")
-            },
-            onCommentThumbsDown: { comment in
-                print("Thumbs down artist comment from \(comment.username)")
+            musicItem: MusicSearchResult(
+                id: artistName.lowercased().replacingOccurrences(of: " ", with: "-"),
+                title: artistName,
+                artistName: artistName,
+                albumName: "",
+                artworkURL: viewModel.artistData.artworkURL,
+                itemType: "artist",
+                popularity: 100
+            ),
+            logs: communityArtistLogs,
+            onViewAllLogs: {
+                print("View all artist logs")
             }
         )
         .padding(.horizontal)
+        .onAppear {
+            if communityArtistLogs.isEmpty && !isLoadingCommunityLogs {
+                Task {
+                    await loadCommunityArtistLogs()
+                }
+            }
+        }
+    }
+    
+    /// Load direct artist logs for community section
+    @MainActor
+    private func loadCommunityArtistLogs() async {
+        isLoadingCommunityLogs = true
+        defer { isLoadingCommunityLogs = false }
+        
+        do {
+            let db = Firestore.firestore()
+            
+            let normalized = ArtistNameParser.normalizedKey(artistName)
+            var snapshot = try await db.collection("logs")
+                .whereField("artistTokens", arrayContains: normalized)
+                .whereField("itemType", isEqualTo: "artist")
+                .getDocuments()
+            
+            var docs = snapshot.documents
+            if docs.isEmpty {
+                snapshot = try await db.collection("logs")
+                    .whereField("artistName", isEqualTo: artistName)
+                    .whereField("itemType", isEqualTo: "artist")
+                    .getDocuments()
+                docs = snapshot.documents
+            }
+            
+            let allLogs = docs.compactMap { try? $0.data(as: MusicLog.self) }
+            
+            // Filter for public logs and ensure artist names match (case-insensitive)
+            let artistLogs = allLogs.filter { log in
+                let isVisible = log.isPublic ?? true
+                let matchesArtist: Bool
+                if let tokens = log.artistTokens, !tokens.isEmpty {
+                    matchesArtist = tokens.contains(normalized)
+                } else {
+                    matchesArtist = log.artistName.caseInsensitiveCompare(artistName) == .orderedSame
+                }
+                return isVisible && matchesArtist
+            }
+            
+            // Sort by engagement score
+            let sortedLogs = EngagementScoringService.shared.sortByEngagement(artistLogs)
+            communityArtistLogs = Array(sortedLogs.prefix(10))
+            
+            print("✅ Loaded \(communityArtistLogs.count) community artist logs for \(artistName)")
+        } catch {
+            print("❌ Error loading community artist logs: \(error.localizedDescription)")
+            communityArtistLogs = []
+        }
     }
     
     // MARK: - Artist Friends Activity Section
@@ -614,7 +666,16 @@ struct ArtistProfileView: View {
         EnhancedFriendsLogsSection(
             itemId: artistName.lowercased().replacingOccurrences(of: " ", with: "-"),
             itemType: "artist",
-            itemTitle: artistName
+            itemTitle: artistName,
+            musicItem: MusicSearchResult(
+                id: artistName.lowercased().replacingOccurrences(of: " ", with: "-"),
+                title: artistName,
+                artistName: artistName,
+                albumName: "",
+                artworkURL: viewModel.artistData.artworkURL,
+                itemType: "artist",
+                popularity: 100
+            )
         )
         .padding(.horizontal)
     }
@@ -789,16 +850,6 @@ struct ArtistProfileView: View {
                 
                     ProfileItemTypeBadge(itemType: "artist")
                 }
-                
-                // Follower stats (primary social metric for artists)
-                if true { // TODO: Add actual follower count logic
-                    ProfileQuickStat(
-                        icon: "person.2.fill",
-                        value: "0", // TODO: Replace with actual follower count
-                        label: "Followers",
-                        color: ProfileDesignSystem.Colors.primary
-                    )
-                }
             }
             
             // Enhanced action buttons
@@ -811,16 +862,84 @@ struct ArtistProfileView: View {
     }
     
     // MARK: - Artist Rating Section
+    @State private var overallArtistRating: Double = 0.0
+    @State private var overallArtistRatingCount: Int = 0
+    @State private var isLoadingArtistRating: Bool = false
+    @State private var userDirectArtistRating: Double = 0.0 // Changed from Int to Double for half-star support
+    
     private var artistRatingSection: some View {
         DisplayOnlyRatingView(
-            userRating: 0, // Artists don't have direct ratings, only through their songs/albums
-            averageRating: calculateOverallAverageRating(),
-            totalRatings: calculateTotalRatingsForArtist()
+            userRating: userDirectArtistRating, // Show user's most recent direct artist rating with half-star support
+            averageRating: overallArtistRating,
+            totalRatings: overallArtistRatingCount
         )
         .padding(.horizontal)
+        .onAppear {
+            if overallArtistRatingCount == 0 && !isLoadingArtistRating {
+                Task {
+                    await loadOverallArtistRating()
+                    await loadUserDirectArtistRating()
+                }
+            }
+        }
     }
     
     // MARK: - Rating Calculation Helpers
+    
+    /// Load the user's most recent direct artist rating (itemType == "artist")
+    @MainActor
+    private func loadUserDirectArtistRating() async {
+        guard let userId = Auth.auth().currentUser?.uid else { return }
+        
+        do {
+            let db = Firestore.firestore()
+            
+            // Fetch user's logs for this artist where itemType is "artist"
+            let snapshot = try await db.collection("logs")
+                .whereField("userId", isEqualTo: userId)
+                .whereField("artistName", isEqualTo: artistName)
+                .whereField("itemType", isEqualTo: "artist")
+                .getDocuments()
+            
+            let artistLogs = snapshot.documents.compactMap { try? $0.data(as: MusicLog.self) }
+            
+            // Filter for logs with ratings and sort by date to get the most recent
+            let ratedLogs = artistLogs
+                .filter { $0.rating != nil && $0.rating! > 0 }
+                .sorted { $0.dateLogged > $1.dateLogged }
+            
+            // Get the most recent rating - NO ROUNDING for half-star support
+            if let mostRecentLog = ratedLogs.first, let rating = mostRecentLog.rating {
+                userDirectArtistRating = rating // Keep as Double, don't round
+                print("✅ Loaded user's most recent direct artist rating: \(userDirectArtistRating)")
+            } else {
+                userDirectArtistRating = 0.0
+                print("ℹ️ No direct artist rating found for user")
+            }
+        } catch {
+            print("❌ Error loading user's direct artist rating: \(error.localizedDescription)")
+            userDirectArtistRating = 0.0
+        }
+    }
+    
+    /// Load overall artist rating from ALL logs (songs, albums, and direct artist logs)
+    @MainActor
+    private func loadOverallArtistRating() async {
+        isLoadingArtistRating = true
+        defer { isLoadingArtistRating = false }
+        
+        let stats = await viewModel.computeOverallArtistRatingStats()
+        overallArtistRating = (stats.average * 10).rounded() / 10
+        overallArtistRatingCount = stats.count
+        
+        if stats.count > 0 {
+            print("✅ Loaded overall artist rating: \(stats.average) from \(stats.count) total ratings")
+        } else {
+            print("ℹ️ No ratings found for artist \(artistName)")
+        }
+    }
+    
+    // Keep old functions for backward compatibility (but they won't be used for the main rating display)
     private func calculateOverallAverageRating() -> Double {
         let allSongs = viewModel.displayedSongs
         let allAlbums = viewModel.displayedAlbums
@@ -859,47 +978,15 @@ struct ArtistProfileView: View {
     
     // MARK: - Enhanced Artist Action Buttons
     private var enhancedArtistActionButtons: some View {
-        HStack(spacing: ProfileDesignSystem.Spacing.md) {
-            // Follow button (primary action)
-            Button(action: {
-                // TODO: Implement follow functionality
-                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                impactFeedback.impactOccurred()
-                print("Follow artist: \(artistName)")
-            }) {
-                HStack(spacing: ProfileDesignSystem.Spacing.sm) {
-                    Image(systemName: "person.badge.plus")
-                    Text("Follow")
-                }
-                .font(ProfileDesignSystem.Typography.bodyMedium)
-                .fontWeight(.semibold)
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .padding(ProfileDesignSystem.Spacing.md)
-                .background(
-                    RoundedRectangle(cornerRadius: ProfileDesignSystem.CornerRadius.medium)
-                        .fill(ProfileDesignSystem.Colors.primary.gradient)
-                )
-            }
-            
-            // Share button (secondary action)
-            Button(action: {
-                shareArtist()
-            }) {
-                HStack(spacing: ProfileDesignSystem.Spacing.sm) {
-                    Image(systemName: "square.and.arrow.up")
-                    Text("Share")
-                }
-                .font(ProfileDesignSystem.Typography.bodyMedium)
-                .fontWeight(.semibold)
-                .foregroundColor(ProfileDesignSystem.Colors.primary)
-                .frame(maxWidth: .infinity)
-                .padding(ProfileDesignSystem.Spacing.md)
-                .background(
-                    RoundedRectangle(cornerRadius: ProfileDesignSystem.CornerRadius.medium)
-                        .stroke(ProfileDesignSystem.Colors.primary, lineWidth: 1.5)
-                )
-            }
+        VStack(spacing: ProfileDesignSystem.Spacing.md) {
+            // Listen On Platform Buttons
+            ListenOnPlatformButtons(
+                itemId: artistName.replacingOccurrences(of: " ", with: "_").lowercased(),
+                itemType: "artist",
+                platform: nil,
+                artistName: artistName,
+                songTitle: nil
+            )
         }
     }
     
@@ -939,78 +1026,6 @@ struct ArtistProfileView: View {
         .accessibilityLabel("Artist profile picture for \(artistName)")
         .accessibilityHint("Artist's official image")
         .accessibilityAddTraits(.isImage)
-    }
-    
-    private var artistStatsView: some View {
-        HStack {
-            StatisticView(
-                value: "0", // TODO: Implement actual follower count
-                label: "Followers",
-                isLoading: false
-            )
-        }
-        .padding(.vertical, 20)
-    }
-    
-    private var artistActionButtons: some View {
-        HStack(spacing: 12) {
-            Button(action: {
-                // Follow artist - TODO: Implement
-                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                impactFeedback.impactOccurred()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "person.badge.plus")
-                    Text("Follow")
-                        .fontWeight(.semibold)
-                }
-                .font(.subheadline)
-                .foregroundColor(.white)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 10)
-                .background(
-                    LinearGradient(
-                        colors: [Color.purple, Color.blue],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .clipShape(Capsule())
-                .shadow(color: .purple.opacity(0.3), radius: 4, x: 0, y: 2)
-            }
-            .buttonStyle(ScaleButtonStyle())
-            .accessibilityLabel("Follow \(artistName)")
-            .accessibilityHint("Double tap to follow this artist and see their updates")
-            .accessibilityAddTraits(.isButton)
-            
-            Button(action: {
-                shareArtist()
-                let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-                impactFeedback.impactOccurred()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "square.and.arrow.up")
-                    Text("Share")
-                        .fontWeight(.semibold)
-                }
-                .font(.subheadline)
-                .foregroundColor(.purple)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 10)
-                .background(Color.purple.opacity(0.1))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(Color.purple.opacity(0.3), lineWidth: 1)
-                )
-            }
-            .buttonStyle(ScaleButtonStyle())
-            .accessibilityLabel("Share \(artistName)")
-            .accessibilityHint("Double tap to share this artist with others")
-            .accessibilityAddTraits(.isButton)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Artist actions")
     }
     
     // MARK: - Helper Methods
@@ -1596,28 +1611,6 @@ struct EnhancedSongRowView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            
-            // Enhanced metadata row (removed timestamp/release year)
-            HStack(spacing: 8) {
-                // Duration badge (moved to metadata row)
-                if let duration = song.duration {
-                    Text(formatDuration(duration))
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.gray.opacity(0.15))
-                        .clipShape(Capsule())
-                }
-                
-                // Engagement indicator
-                if song.totalLogs > 0 {
-                    EngagementBadge(count: song.totalLogs, type: .logs)
-                }
-                
-                Spacer()
-            }
         }
     }
     
@@ -1780,10 +1773,9 @@ struct EnhancedAlbumCardView: View {
     
     private var albumArtworkSection: some View {
         ZStack {
-            // Main artwork
-            AsyncImage(url: URL(string: album.artworkURL ?? "")) { phase in
-                switch phase {
-                case .success(let image):
+            // Main artwork - use CachedAsyncImage for better reliability
+            if let artworkURL = album.artworkURL, !artworkURL.isEmpty, let imageURL = URL(string: artworkURL) {
+                CachedAsyncImage(url: imageURL) { image in
                     image
                         .resizable()
                         .aspectRatio(1, contentMode: .fill)
@@ -1800,7 +1792,18 @@ struct EnhancedAlbumCardView: View {
                                 )
                         )
                         .shadow(color: shadowColorForAlbum, radius: isPressed ? 4 : 8, x: 0, y: isPressed ? 2 : 4)
-                case .failure(_):
+                } placeholder: {
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color.gray.opacity(0.2))
+                        .aspectRatio(1, contentMode: .fit)
+                        .overlay(
+                            ProgressView()
+                                .scaleEffect(1.2)
+                                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
+                        )
+                }
+            } else {
+                // Fallback placeholder if no artworkURL
                     RoundedRectangle(cornerRadius: 16)
                         .fill(
                             LinearGradient(
@@ -1823,18 +1826,6 @@ struct EnhancedAlbumCardView: View {
                             }
                         )
                         .shadow(color: shadowColorForAlbum, radius: isPressed ? 4 : 8, x: 0, y: isPressed ? 2 : 4)
-                case .empty:
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(Color.gray.opacity(0.2))
-                        .aspectRatio(1, contentMode: .fit)
-                        .overlay(
-                            ProgressView()
-                                .scaleEffect(1.2)
-                                .progressViewStyle(CircularProgressViewStyle(tint: .purple))
-                        )
-                @unknown default:
-                    EmptyView()
-                }
             }
             
             // Popularity indicator overlay
@@ -1845,18 +1836,6 @@ struct EnhancedAlbumCardView: View {
                         popularityBadge
                     }
                     Spacer()
-                }
-                .padding(12)
-            }
-            
-            // Rating overlay with glassmorphism effect
-            if album.averageRating > 0 {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        ratingOverlay
-                    }
                 }
                 .padding(12)
             }
@@ -1902,36 +1881,6 @@ struct EnhancedAlbumCardView: View {
                 }
                 
                 Spacer()
-            }
-            
-            // Rating and engagement row
-            HStack {
-                if album.averageRating > 0 {
-                    HStack(spacing: 4) {
-                        // Compact star display
-                        RatingStarsView(
-                            rating: album.averageRating,
-                            starSize: 8,
-                            spacing: 1,
-                            animated: false
-                        )
-                        
-                        Text("(\(album.totalRatings))")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    Text("Not rated")
-                        .font(.caption2)
-                        .foregroundColor(Color(UIColor.tertiaryLabel))
-                }
-                
-                Spacer()
-                
-                // Engagement indicator
-                if album.totalLogs > 0 {
-                    EngagementBadge(count: album.totalLogs, type: .logs)
-                }
             }
             
             // Expandable details
@@ -1999,25 +1948,6 @@ struct EnhancedAlbumCardView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
         }
-    }
-    
-    private var ratingOverlay: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "star.fill")
-                .font(.caption2)
-                .foregroundColor(.yellow)
-            Text(String(format: "%.1f", album.averageRating))
-                .font(.caption)
-                .fontWeight(.bold)
-                .foregroundColor(.white)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
     }
     
     // MARK: - Computed Properties

@@ -82,13 +82,24 @@ struct EnhancedTrendingSectionView: View {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                             EnhancedTrendingCard(
                                 item: item,
-                                friends: friendsData[item.id] ?? [],
+                                friends: friendsData[item.itemId] ?? [],
                                 showFriendPictures: showFriendPictures,
                                 cardWidth: 140,
                                 onTap: { handleItemTap(item) },
                                 onTapArtist: { handleArtistTap(item) }
                             )
                             .onAppear {
+                                // Debug logging for friend data lookup
+                                if showFriendPictures && index < 3 {
+                                    print("📱 EnhancedTrendingSectionView '\(title)' - Card \(index + 1):")
+                                    print("   Item: '\(item.title)' (itemId: \(item.itemId))")
+                                    let friendsForItem = friendsData[item.itemId] ?? []
+                                    print("   Friends found: \(friendsForItem.count)")
+                                    if !friendsForItem.isEmpty {
+                                        print("   Friend names: \(friendsForItem.map { $0.displayName }.joined(separator: ", "))")
+                                    }
+                                }
+                                
                                 // Trigger near end callback for pagination
                                 if let onNearEnd = onNearEnd,
                                    index >= items.count - 3 {
@@ -99,6 +110,15 @@ struct EnhancedTrendingSectionView: View {
                     }
                     .padding(.horizontal)
                 }
+            }
+        }
+        .onAppear {
+            // Log section-level info
+            if showFriendPictures {
+                print("📋 EnhancedTrendingSectionView '\(title)' loaded:")
+                print("   Items count: \(items.count)")
+                print("   FriendsData dictionary keys count: \(friendsData.count)")
+                print("   FriendsData dictionary keys (first 5): \(Array(friendsData.keys).prefix(5))")
             }
         }
     }
@@ -146,7 +166,7 @@ struct TrendingCardSkeleton: View {
 #Preview {
     VStack(spacing: 20) {
         EnhancedTrendingSectionView(
-            title: "Popular with Friends",
+            title: "Trending with Friends",
             items: [
                 TrendingItem(id: "1", title: "Midnight Drive", subtitle: "Astra", artworkUrl: nil, logCount: 8, itemType: "album", itemId: "1"),
                 TrendingItem(id: "2", title: "Neon Lights", subtitle: "Echo Wave", artworkUrl: nil, logCount: 6, itemType: "album", itemId: "2"),

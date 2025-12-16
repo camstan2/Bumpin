@@ -20,11 +20,12 @@ class AgoraVoiceService: NSObject, ObservableObject {
     private var agoraKit: AgoraRtcEngineKit?
     private var channelId: String?
     private var userId: UInt?
+    private var isAudioSessionActive = false
     
     override init() {
         super.init()
-        setupAudioSession()
         initializeAgoraEngine()
+        // Don't activate audio session until joining a channel
     }
     
     deinit {
@@ -34,13 +35,30 @@ class AgoraVoiceService: NSObject, ObservableObject {
     }
     
     // MARK: - Audio Session Setup
-    private func setupAudioSession() {
+    private func activateAudioSession() {
+        guard !isAudioSessionActive else { return }
+        
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
             try audioSession.setActive(true)
+            isAudioSessionActive = true
+            print("✅ Agora audio session activated")
         } catch {
-            print("❌ Failed to setup audio session: \(error)")
+            print("❌ Failed to activate Agora audio session: \(error)")
+        }
+    }
+    
+    private func deactivateAudioSession() {
+        guard isAudioSessionActive else { return }
+        
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            isAudioSessionActive = false
+            print("✅ Agora audio session deactivated")
+        } catch {
+            print("❌ Failed to deactivate Agora audio session: \(error)")
         }
     }
     
@@ -64,6 +82,9 @@ class AgoraVoiceService: NSObject, ObservableObject {
             return
         }
         
+        // Activate audio session when joining channel
+        activateAudioSession()
+        
         self.channelId = channelId
         self.userId = UInt(userId.hashValue)
         
@@ -72,6 +93,7 @@ class AgoraVoiceService: NSObject, ObservableObject {
         
         if result != 0 {
             error = .joinChannelFailed(code: Int(result))
+            deactivateAudioSession()
         }
     }
     
@@ -83,6 +105,9 @@ class AgoraVoiceService: NSObject, ObservableObject {
         activeSpeakers.removeAll()
         channelId = nil
         userId = nil
+        
+        // Deactivate audio session when leaving channel
+        deactivateAudioSession()
     }
     
     // MARK: - Audio Controls

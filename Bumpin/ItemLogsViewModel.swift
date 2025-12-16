@@ -23,50 +23,53 @@ class ItemLogsViewModel: ObservableObject {
     func fetch() async {
         isLoading = true
         error = nil
-
-        // If no friendIds or <= 10, use the existing single call
-        if friendIds == nil || (friendIds?.count ?? 0) <= 10 {
-            MusicLog.fetchLogsForItem(itemId: itemId, friendIds: friendIds, limit: 20) { [weak self] logs, err in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    self.isLoading = false
-                    if let err = err {
-                        self.error = err.localizedDescription
-                    } else {
-                        self.logs = (logs ?? []).sorted { $0.dateLogged > $1.dateLogged }
-                    }
+        
+        do {
+            let fetchedLogs: [MusicLog]
+            if let friendIds, friendIds.count > 10 {
+                fetchedLogs = try await fetchLogsInBatches(friendIds: friendIds)
+            } else {
+                fetchedLogs = try await MusicLogStore.shared.fetchLogsForItem(itemId: itemId,
+                                                                             friendIds: friendIds,
+                                                                             limit: 20)
+            }
+            self.logs = deduplicatedAndSorted(fetchedLogs)
+            self.isLoading = false
+        } catch {
+            self.error = error.localizedDescription
+            self.isLoading = false
+        }
+    }
+    
+    private func fetchLogsInBatches(friendIds: [String]) async throws -> [MusicLog] {
+        let targetItemId = itemId
+        let batches = friendIds.chunked(into: 10)
+        var aggregated: [MusicLog] = []
+        
+        try await withThrowingTaskGroup(of: [MusicLog].self) { group in
+            for batch in batches {
+                group.addTask {
+                    try await MusicLogStore.shared.fetchLogsForItem(itemId: targetItemId,
+                                                                   friendIds: batch,
+                                                                   limit: 20)
                 }
             }
-            return
-        }
-
-        // Batch into groups of 10 for Firestore 'in' query limits
-        let batches: [[String]] = friendIds!.chunked(into: 10)
-        var aggregated: [MusicLog] = []
-        var firstError: Error?
-
-        let group = DispatchGroup()
-        for batch in batches {
-            group.enter()
-            MusicLog.fetchLogsForItem(itemId: itemId, friendIds: batch, limit: 20) { logs, err in
-                if let err = err, firstError == nil { firstError = err }
-                if let logs = logs { aggregated.append(contentsOf: logs) }
-                group.leave()
+            
+            for try await result in group {
+                aggregated.append(contentsOf: result)
             }
         }
-
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
-            self.isLoading = false
-            if let err = firstError {
-                self.error = err.localizedDescription
-            }
-            var seen = Set<String>()
-            self.logs = aggregated.filter { log in
-                if seen.contains(log.id) { return false }
+        return aggregated
+    }
+    
+    private func deduplicatedAndSorted(_ logs: [MusicLog]) -> [MusicLog] {
+        var seen = Set<String>()
+        return logs
+            .sorted { $0.dateLogged > $1.dateLogged }
+            .filter { log in
+                guard !seen.contains(log.id) else { return false }
                 seen.insert(log.id)
                 return true
-            }.sorted { $0.dateLogged > $1.dateLogged }
-        }
+            }
     }
 }

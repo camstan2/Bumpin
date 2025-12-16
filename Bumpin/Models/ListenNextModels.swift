@@ -4,17 +4,17 @@ import SwiftUI
 
 // MARK: - Listen Later Item Model
 struct ListenLaterItem: Identifiable, Codable, Equatable {
-    var id: String
-    var userId: String
-    var itemId: String // Apple Music ID
-    var itemType: ListenLaterItemType
-    var title: String
-    var artistName: String
-    var albumName: String? // For songs
-    var artworkUrl: String?
-    var addedAt: Date
-    var averageRating: Double? // Calculated from all user logs
-    var totalRatings: Int // Number of users who rated this
+    let id: String
+    let userId: String
+    let itemId: String // Apple Music ID
+    let itemType: ListenLaterItemType
+    let title: String
+    let artistName: String
+    let albumName: String? // For songs
+    let artworkUrl: String?
+    let addedAt: Date
+    var averageRating: Double? // Calculated from all user logs (mutable for runtime updates)
+    var totalRatings: Int // Number of users who rated this (mutable for runtime updates)
     
     init(id: String = UUID().uuidString, userId: String, itemId: String, itemType: ListenLaterItemType, title: String, artistName: String, albumName: String? = nil, artworkUrl: String? = nil, addedAt: Date = Date()) {
         self.id = id
@@ -104,25 +104,30 @@ struct ListenLaterSearchResult: Identifiable {
 
 // MARK: - Firestore Extensions
 extension ListenLaterItem {
+    // MARK: - Collection Helpers
+    static func collection(for userId: String) -> CollectionReference {
+        Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .collection("listenLater")
+    }
     
     // MARK: - Create Listen Later Item
     static func create(_ item: ListenLaterItem) async throws {
-        let db = Firestore.firestore()
         print("💾 ListenLaterItem.create called")
         print("   Document ID: \(item.id)")
-        print("   Collection: listenLater")
+        print("   Collection: users/\(item.userId)/listenLater")
         print("   Data: \(item)")
         
-        try await db.collection("listenLater").document(item.id).setData(from: item)
-        print("✅ Successfully saved to Firestore collection 'listenLater'")
+        try await collection(for: item.userId)
+            .document(item.id)
+            .setData(from: item)
+        print("✅ Successfully saved to Firestore subcollection 'listenLater'")
     }
     
     // MARK: - Fetch Listen Later Items for User
     static func fetchItemsForUser(userId: String, type: ListenLaterItemType? = nil) async throws -> [ListenLaterItem] {
-        let db = Firestore.firestore()
-        
-        var query: Query = db.collection("listenLater")
-            .whereField("userId", isEqualTo: userId)
+        var query: Query = collection(for: userId)
         
         if let type = type {
             query = query.whereField("itemType", isEqualTo: type.rawValue)
@@ -135,17 +140,15 @@ extension ListenLaterItem {
     }
     
     // MARK: - Remove Listen Later Item
-    static func removeItem(id: String) async throws {
-        let db = Firestore.firestore()
-        try await db.collection("listenLater").document(id).delete()
+    static func removeItem(id: String, userId: String) async throws {
+        try await collection(for: userId)
+            .document(id)
+            .delete()
     }
     
     // MARK: - Check if item exists in Listen Later
     static func itemExists(userId: String, itemId: String, type: ListenLaterItemType) async throws -> Bool {
-        let db = Firestore.firestore()
-        
-        let snapshot = try await db.collection("listenLater")
-            .whereField("userId", isEqualTo: userId)
+        let snapshot = try await collection(for: userId)
             .whereField("itemId", isEqualTo: itemId)
             .whereField("itemType", isEqualTo: type.rawValue)
             .limit(to: 1)
@@ -174,7 +177,7 @@ extension ListenLaterItem {
             let totalRatings = ratings.count
             
             // Update all Listen Later items with this itemId
-            let listenLaterSnapshot = try await db.collection("listenLater")
+            let listenLaterSnapshot = try await db.collectionGroup("listenLater")
                 .whereField("itemId", isEqualTo: itemId)
                 .whereField("itemType", isEqualTo: itemType.rawValue)
                 .getDocuments()

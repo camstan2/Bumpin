@@ -3,12 +3,14 @@ import FirebaseAuth
 import FirebaseFirestore
 
 struct MyDiaryView: View {
+    @EnvironmentObject private var alertCenter: AlertCenter
     @State private var logs: [MusicLog] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var selectedLog: MusicLog?
     @State private var showingEditView = false
     @State private var logToEdit: MusicLog?
+    @State private var fetchTask: Task<Void, Never>?
     
     var body: some View {
         NavigationView {
@@ -36,6 +38,10 @@ struct MyDiaryView: View {
             }
             .navigationTitle("My Diary")
             .onAppear(perform: fetchLogs)
+            .onDisappear {
+                fetchTask?.cancel()
+                fetchTask = nil
+            }
             .sheet(item: $selectedLog) { log in
                 NavigationView {
                     ScrollView(.vertical, showsIndicators: true) {
@@ -72,24 +78,35 @@ struct MyDiaryView: View {
     }
     
     private func fetchLogs() {
+        fetchTask?.cancel()
         guard let userId = Auth.auth().currentUser?.uid else {
             errorMessage = "You must be logged in to view your diary."
             return
         }
         isLoading = true
         errorMessage = nil
-        MusicLog.fetchLogsForUser(userId: userId) { logs, error in
-            DispatchQueue.main.async {
-                isLoading = false
-                if let error = error {
-                    // Don't show Firestore index errors in UI - they should be handled in Firebase console
-                    if !error.localizedDescription.contains("index") && !error.localizedDescription.contains("create_composite") {
-                        errorMessage = error.localizedDescription
+        fetchTask = Task {
+            do {
+                let fetched = try await MusicLogStore.shared.fetchLogs(forUserId: userId)
+                await MainActor.run {
+                    self.logs = fetched
+                    self.isLoading = false
+                    AppLogger.info("Loaded \(fetched.count) diary logs", category: .musicLog)
+                }
+            } catch is CancellationError {
+                // Ignore cancellations (view disappeared or refresh restarted)
+            } catch {
+                await MainActor.run {
+                    self.isLoading = false
+                    let message = error.localizedDescription
+                    if message.contains("index") || message.contains("create_composite") {
+                        AppLogger.warning("Firestore index required for logs query: \(message)", category: .musicLog)
+                        self.errorMessage = nil
                     } else {
-                        print("⚠️ Firestore index needed: \(error.localizedDescription)")
+                        self.errorMessage = message
+                        alertCenter.showToast("Failed to load diary: \(message)", style: .error)
+                        AppLogger.error("Failed to load diary logs: \(message)", category: .musicLog)
                     }
-                } else {
-                    self.logs = logs ?? []
                 }
             }
         }
@@ -128,13 +145,7 @@ struct LogDetailViewLegacy: View {
                     .font(.headline)
                     .foregroundColor(.secondary)
                 if let rating = log.rating {
-                    HStack(spacing: 4) {
-                        ForEach(1...5, id: \.self) { star in
-                            Image(systemName: star <= rating ? "star.fill" : "star")
-                                .foregroundColor(.yellow)
-                                .font(.title3)
-                        }
-                    }
+                    StarRatingDisplayView(rating: rating, starSize: 14, spacing: 2)
                 }
                         Text("Listened on \(log.dateLogged, style: .date)")
                             .font(.caption)
@@ -278,22 +289,23 @@ struct LogDetailViewLegacy: View {
     }
     
     private func addComment() {
-        guard let currentUser = Auth.auth().currentUser,
-              !newCommentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let trimmed = newCommentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         
         isAddingComment = true
         
-        // Get user profile info for the comment
-        Firestore.firestore().collection("users").document(currentUser.uid).getDocument { snapshot, error in
-            let username = snapshot?.data()?["username"] as? String ?? "Unknown User"
-            let profilePictureUrl = snapshot?.data()?["profilePictureUrl"] as? String
+        Task {
+            guard let context = await ReviewComment.currentUserContext() else {
+                await MainActor.run { isAddingComment = false }
+                return
+            }
             
             let comment = ReviewComment(
                 logId: log.id,
-                userId: currentUser.uid,
-                username: username,
-                userProfilePictureUrl: profilePictureUrl,
-                text: newCommentText.trimmingCharacters(in: .whitespacesAndNewlines)
+                userId: context.userId,
+                username: context.username,
+                userProfilePictureUrl: context.profilePictureUrl,
+                text: trimmed
             )
             
             ReviewComment.addComment(comment) { error in
@@ -303,7 +315,7 @@ struct LogDetailViewLegacy: View {
                         print("Error adding comment: \(error)")
                     } else {
                         newCommentText = ""
-                        loadComments() // Refresh comments
+                        loadComments()
                     }
                 }
             }

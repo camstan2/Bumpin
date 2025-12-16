@@ -14,7 +14,8 @@ extension MusicProfileView {
                 EnhancedFriendsLogsSection(
                     itemId: musicItem.id,
                     itemType: musicItem.itemType,
-                    itemTitle: musicItem.title
+                    itemTitle: musicItem.title,
+                    musicItem: musicItem
                 )
             }
         }

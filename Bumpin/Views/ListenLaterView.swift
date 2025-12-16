@@ -58,9 +58,36 @@ struct ListenLaterView: View {
             listenLaterService.refreshAllSections()
         }
         .sheet(isPresented: $showAddToListenLater) {
-            AddToListenLaterView(
-                selectedSection: selectedSection,
-                listenLaterService: listenLaterService
+            ComprehensiveSearchView(
+                listenLaterSelectionMode: true,
+                onListenLaterItemsSelected: { selectedItems in
+                    // Categorize and add items to the correct sections
+                    Task {
+                        for item in selectedItems {
+                            let type: ListenLaterItemType
+                            switch item.itemType {
+                            case "song":
+                                type = .song
+                            case "album":
+                                type = .album
+                            case "artist":
+                                type = .artist
+                            default:
+                                continue
+                            }
+                            
+                            let success = await listenLaterService.addItem(item, type: type)
+                            if success {
+                                print("✅ Added \(item.title) to Listen Later as \(type.displayName)")
+                            }
+                        }
+                        
+                        // Refresh all sections after adding items
+                        await MainActor.run {
+                            listenLaterService.refreshAllSections()
+                        }
+                    }
+                }
             )
         }
     }
@@ -310,34 +337,21 @@ struct ListenLaterItemRow: View {
                             .lineLimit(1)
                     }
                     
-                    // Enhanced rating display
+                    // Enhanced rating display with stars
                     HStack(spacing: 8) {
-                        if let averageRating = item.averageRating, averageRating > 0 {
-                            HStack(spacing: 3) {
-                                Image(systemName: "star.fill")
-                                    .font(.caption)
-                                    .foregroundColor(.yellow)
+                        if let averageRating = item.averageRating, item.totalRatings > 0 {
+                            HStack(spacing: 4) {
                                 Text(String(format: "%.1f", averageRating))
                                     .font(.caption)
                                     .fontWeight(.semibold)
                                     .foregroundColor(.primary)
+                                
+                                StarRatingView(rating: averageRating, size: 10)
                             }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.yellow.opacity(0.1))
-                            .clipShape(Capsule())
-                            
-                            Text("(\(item.totalRatings) ratings)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
                         } else {
                             Text("No ratings yet")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.gray.opacity(0.1))
-                                .clipShape(Capsule())
                         }
                         
                         Spacer()

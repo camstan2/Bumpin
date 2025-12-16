@@ -31,15 +31,18 @@ class VoiceChatManager: ObservableObject {
     // Audio session for voice chat
     private var voiceChatSession: AVAudioSession?
     private var requestsListener: ListenerRegistration?
+    private var isAudioSessionActive = false
     
     init() {
-        setupAudioSession()
         setupNotifications()
+        // Don't activate audio session until voice chat actually starts
     }
     
     // MARK: - Audio Setup
     
-    private func setupAudioSession() {
+    private func activateAudioSession() {
+        guard !isAudioSessionActive else { return }
+        
         voiceChatSession = AVAudioSession.sharedInstance()
         
         do {
@@ -59,9 +62,22 @@ class VoiceChatManager: ObservableObject {
             try voiceChatSession?.setPreferredIOBufferDuration(0.005) // Low latency
             
             try voiceChatSession?.setActive(true)
+            isAudioSessionActive = true
             print("✅ Audio session configured with echo cancellation")
         } catch {
             print("❌ Failed to setup audio session: \(error)")
+        }
+    }
+    
+    private func deactivateAudioSession() {
+        guard isAudioSessionActive else { return }
+        
+        do {
+            try voiceChatSession?.setActive(false, options: .notifyOthersOnDeactivation)
+            isAudioSessionActive = false
+            print("✅ Voice chat audio session deactivated")
+        } catch {
+            print("❌ Failed to deactivate audio session: \(error)")
         }
     }
     
@@ -104,7 +120,7 @@ class VoiceChatManager: ObservableObject {
     
     @objc private func handleRouteChange(notification: Notification) {
         // Handle audio route changes (headphones, speaker, etc.)
-        print("🎤 Audio route changed")
+        // Removed excessive logging - audio route changes are normal and frequent
     }
     
     // MARK: - Voice Chat Control
@@ -114,6 +130,8 @@ class VoiceChatManager: ObservableObject {
         self.currentUserId = Auth.auth().currentUser?.uid
         self.currentUserName = Auth.auth().currentUser?.displayName ?? "You"
         
+        // Activate audio session only when starting voice chat
+        activateAudioSession()
         setupAudioEngine()
         isVoiceChatActive = true
         
@@ -127,6 +145,7 @@ class VoiceChatManager: ObservableObject {
         isMuted = false
         
         cleanupAudioEngine()
+        deactivateAudioSession()
         
         print("🎤 Voice chat stopped")
         requestsListener?.remove(); requestsListener = nil

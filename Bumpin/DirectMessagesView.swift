@@ -29,52 +29,87 @@ struct DMInboxView: View {
 
     var body: some View {
         NavigationStack {
-            VStack {
-                Picker("Messages", selection: $segment) {
-                    Text("Inbox").tag(0)
-                    Text("Requests").tag(1)
-                }
-                .pickerStyle(SegmentedPickerStyle())
-                .padding()
-
-                List(currentList, id: \.id) { convo in
-                    HStack(spacing: 12) {
-                        EnhancedConversationListItem(
-                            conversation: convo,
-                            displayName: otherDisplayName(convo),
-                            profileImageUrl: otherProfileImageUrl(convo),
-                            onTap: { selectedConversation = convo }
-                        )
-                        
-                        if segment == 1 {
-                            HStack(spacing: 8) {
-                                Button("Accept") {
-                                    if let uid = Auth.auth().currentUser?.uid {
-                                        DirectMessageService.shared.acceptRequest(conversationId: convo.id, userId: uid) { err in
-                                            if let err = err { print("Accept error: \(err.localizedDescription)") }
-                                        }
-                                    }
-                                }
-                                .font(.caption2)
-                                .foregroundColor(.green)
-                                
-                                Button("Decline") {
-                                    if let uid = Auth.auth().currentUser?.uid {
-                                        DirectMessageService.shared.declineRequest(conversationId: convo.id, userId: uid) { err in
-                                            if let err = err { print("Decline error: \(err.localizedDescription)") }
-                                        }
-                                    }
-                                }
-                                .font(.caption2)
-                                .foregroundColor(.red)
+            VStack(spacing: 0) {
+                // Custom Tab Selector (matching notifications design)
+                HStack(spacing: 0) {
+                    ForEach([("Inbox", 0), ("Requests", 1)], id: \.1) { title, tag in
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                segment = tag
                             }
-                        } else if isUnread(convo) {
-                            Circle().fill(Color.purple).frame(width: 8, height: 8)
+                        }) {
+                            VStack(spacing: 4) {
+                                Text(title)
+                                    .font(.subheadline)
+                                    .fontWeight(segment == tag ? .bold : .regular)
+                                    .foregroundColor(segment == tag ? .primary : .secondary)
+                                    .padding(.vertical, 12)
+                                    .frame(maxWidth: .infinity)
+                                
+                                // Bottom indicator line
+                                if segment == tag {
+                                    Rectangle()
+                                        .fill(Color.purple)
+                                        .frame(height: 3)
+                                } else {
+                                    Rectangle()
+                                        .fill(Color.clear)
+                                        .frame(height: 3)
+                                }
+                            }
                         }
+                        .buttonStyle(PlainButtonStyle())
+                        .background(segment == tag ? Color.purple.opacity(0.12) : Color.clear)
                     }
-                    .buttonStyle(PlainButtonStyle())
                 }
-                .listStyle(PlainListStyle())
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .background(Color(.systemBackground))
+                
+                // Content
+                if currentList.isEmpty {
+                    emptyStateView
+                } else {
+                    List(currentList, id: \.id) { convo in
+                        HStack(spacing: 12) {
+                            EnhancedConversationListItem(
+                                conversation: convo,
+                                displayName: conversationDisplayName(convo),
+                                subtitle: conversationSubtitle(convo),
+                                participantsPreview: conversationParticipantsPreview(convo),
+                                onTap: { selectedConversation = convo }
+                            )
+                            
+                            if segment == 1 {
+                                HStack(spacing: 8) {
+                                    Button("Accept") {
+                                        if let uid = Auth.auth().currentUser?.uid {
+                                            DirectMessageService.shared.acceptRequest(conversationId: convo.id, userId: uid) { err in
+                                                if let err = err { print("Accept error: \(err.localizedDescription)") }
+                                            }
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundColor(.green)
+                                    
+                                    Button("Decline") {
+                                        if let uid = Auth.auth().currentUser?.uid {
+                                            DirectMessageService.shared.declineRequest(conversationId: convo.id, userId: uid) { err in
+                                                if let err = err { print("Decline error: \(err.localizedDescription)") }
+                                            }
+                                        }
+                                    }
+                                    .font(.caption2)
+                                    .foregroundColor(.red)
+                                }
+                            } else if isUnread(convo) {
+                                Circle().fill(Color.blue).frame(width: 9, height: 9)
+                            }
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    .listStyle(PlainListStyle())
+                }
             }
             .navigationTitle("Messages")
             .onAppear(perform: attach)
@@ -87,9 +122,12 @@ struct DMInboxView: View {
                 }
             }
             .fullScreenCover(item: $selectedConversation) { convo in
-                ConversationView(conversation: convo, onDismiss: {
-                    selectedConversation = nil
-                })
+                ConversationView(
+                    conversation: convo,
+                    onDismiss: { selectedConversation = nil },
+                    initialDisplayName: conversationDisplayName(convo),
+                    initialProfilePictureUrl: conversationParticipantsPreview(convo).first?.1
+                )
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -101,18 +139,71 @@ struct DMInboxView: View {
         }
         .sheet(isPresented: $showingCompose) {
             NavigationView {
-                DMComposeSearchView(onSelect: { user in
+                DMComposeSearchView { conversation in
                     showingCompose = false
-                    DirectMessageService.shared.getOrCreateConversation(with: user.uid) { convo, err in
-                        if let convo = convo { selectedConversation = convo }
-                    }
-                })
+                    selectedConversation = conversation
+                }
                 .navigationTitle("New Message")
             }
         }
     }
 
     private var currentList: [Conversation] { segment == 0 ? inbox : requests }
+    
+    // MARK: - Empty State
+    
+    private var emptyStateView: some View {
+        VStack(spacing: 20) {
+            // Icon
+            ZStack {
+                Circle()
+                    .fill(Color.purple.opacity(0.1))
+                    .frame(width: 100, height: 100)
+                
+                Image(systemName: segment == 0 ? "tray" : "envelope.badge")
+                    .font(.system(size: 48))
+                    .foregroundColor(.purple)
+            }
+            
+            // Text content
+            VStack(spacing: 8) {
+                Text(segment == 0 ? "No messages yet" : "No message requests")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.primary)
+                
+                Text(segment == 0
+                    ? "Start a conversation with your friends and\nshare your music tastes"
+                    : "You have no pending message requests")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            
+            // CTA Button (only for inbox)
+            if segment == 0 {
+                Button(action: { showingCompose = true }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 16))
+                        Text("Start a New Chat")
+                            .fontWeight(.semibold)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(
+                        Capsule()
+                            .fill(Color.purple)
+                    )
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
 
     private func attach() {
         inboxListener?.remove(); requestsListener?.remove()
@@ -131,15 +222,34 @@ struct DMInboxView: View {
         requestsListener?.remove(); requestsListener = nil
     }
 
+    private var currentUserId: String? {
+        Auth.auth().currentUser?.uid
+    }
+    
     private func otherUserId(_ convo: Conversation) -> String? {
-        let myId = Auth.auth().currentUser?.uid
+        guard let myId = currentUserId else { return nil }
         return convo.participantIds.first { $0 != myId }
     }
-
-    private func otherDisplayName(_ convo: Conversation) -> String {
-        // Handle bot conversations
+    
+    private func conversationDisplayName(_ convo: Conversation) -> String {
         if convo.isBotConversation {
             return "Music Matchmaking Bot"
+        }
+        
+        if convo.isGroupConversation {
+            if let name = convo.groupName, !name.isEmpty {
+                return name
+            }
+            let names = conversationParticipantsPreview(convo).map { $0.0 }
+            if names.isEmpty {
+                return "Group Chat"
+            } else if names.count == 1 {
+                return names[0]
+            } else if names.count == 2 {
+                return "\(names[0]), \(names[1])"
+            } else {
+                return "\(names[0]), \(names[1]) +\(names.count - 2)"
+            }
         }
         
         if let uid = otherUserId(convo), let meta = userMeta[uid] {
@@ -149,49 +259,45 @@ struct DMInboxView: View {
         return "@user"
     }
     
-    private func otherProfileImageUrl(_ convo: Conversation) -> String? {
-        // Bot conversations don't have profile images
-        if convo.isBotConversation {
-            return nil
+    private func conversationSubtitle(_ convo: Conversation) -> String {
+        if let last = convo.lastMessage, !last.isEmpty {
+            return last
         }
-        
+        if convo.isGroupConversation {
+            return "\(max(convo.participantIds.count, 2)) members"
+        }
         if let uid = otherUserId(convo), let meta = userMeta[uid] {
-            return meta.pfp
+            return "@\(meta.username)"
         }
-        return nil
+        return "Message"
     }
-
-    @ViewBuilder
-    private func avatarView(for convo: Conversation) -> some View {
-        let size: CGFloat = 40
-        if let uid = otherUserId(convo), let meta = userMeta[uid], let urlString = meta.pfp, let url = URL(string: urlString) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill().frame(width: size, height: size).clipShape(Circle())
-                case .failure(_):
-                    Circle().fill(Color.purple.opacity(0.2)).frame(width: size, height: size)
-                case .empty:
-                    Circle().fill(Color.gray.opacity(0.2)).frame(width: size, height: size)
-                @unknown default:
-                    Circle().fill(Color.gray.opacity(0.2)).frame(width: size, height: size)
-                }
+    
+    private func conversationParticipantsPreview(_ convo: Conversation) -> [(String, String?)] {
+        guard let myId = Auth.auth().currentUser?.uid else { return [] }
+        var previews: [(String, String?)] = []
+        let others = convo.participantIds.filter { $0 != myId }
+        for uid in others.prefix(2) {
+            if let meta = userMeta[uid] {
+                previews.append((meta.username, meta.pfp))
+            } else if let cached = DMUserMetaCache.shared.get(uid) {
+                previews.append((cached.0, cached.1))
+            } else {
+                previews.append(("@\(uid.prefix(6))", nil))
             }
-        } else {
-            Circle().fill(Color.purple.opacity(0.2)).frame(width: size, height: size)
         }
+        return previews
     }
-
+    
     private func ensureUserMeta() {
-        let myId = Auth.auth().currentUser?.uid
+        guard let myId = Auth.auth().currentUser?.uid else { return }
         let allConversations = inbox + requests
-        let otherUserIds = allConversations.compactMap { convo in
-            convo.participantIds.first { $0 != myId }
-        }
+        let otherUserIds = Set(allConversations.flatMap { convo in
+            convo.participantIds.filter { $0 != myId }
+        })
         let missing = otherUserIds.filter { DMUserMetaCache.shared.get($0) == nil && userMeta[$0] == nil }
         guard !missing.isEmpty else { return }
         let db = Firestore.firestore()
-        for batch in missing.chunked(into: 10) {
+        for batch in Array(missing).chunked(into: 10) {
             db.collection("users").whereField("uid", in: batch).getDocuments { snapshot, _ in
                 guard let documents = snapshot?.documents else { return }
                 var updates: [String: (String, String?)] = [:]
@@ -200,6 +306,8 @@ struct DMInboxView: View {
                     let uid = data["uid"] as? String ?? doc.documentID
                     let username = data["username"] as? String ?? data["displayName"] as? String ?? "user"
                     let pfp = data["profilePictureUrl"] as? String
+                        ?? data["profileImageUrl"] as? String
+                        ?? data["profileHeaderUrl"] as? String
                     DMUserMetaCache.shared.set(uid: uid, username: username, pfp: pfp)
                     updates[uid] = (username, pfp)
                 }
@@ -221,55 +329,212 @@ struct DMInboxView: View {
 }
 
 struct DMComposeSearchView: View {
-    var onSelect: (UserProfile) -> Void
+    var onConversationReady: (Conversation) -> Void
+    
+    @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
     @State private var results: [UserProfile] = []
+    @State private var selectedUsers: [UserProfile] = []
     @State private var isLoading = false
     @State private var error: String?
-
+    @State private var groupName: String = ""
+    @State private var isCreatingConversation = false
+    
+    private var isGroupChat: Bool { selectedUsers.count > 1 }
+    private var canStartChat: Bool { !selectedUsers.isEmpty && !isCreatingConversation }
+    
     var body: some View {
-        VStack {
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundColor(.gray)
-                TextField("Search users", text: $searchText)
-                    .textInputAutocapitalization(.never)
-                    .disableAutocorrection(true)
-                    .onSubmit { search() }
-                Button(action: search) { Image(systemName: "magnifyingglass").foregroundColor(.purple) }
+        VStack(spacing: 0) {
+            searchBar
+            
+            if !selectedUsers.isEmpty {
+                selectionChips
             }
-            .padding(10)
-            .background(Color(.systemGray6))
-            .cornerRadius(10)
-            .padding()
-
-            if isLoading { ProgressView().padding(.top, 12) }
-            if let error = error { Text(error).foregroundColor(.red).padding(.top, 12) }
-
-            List(results) { user in
-                Button(action: { onSelect(user) }) {
-                    HStack(spacing: 16) {
-                        if let url = user.profilePictureUrl, let u = URL(string: url) {
-                            AsyncImage(url: u) { phase in
-                                phase.image?.resizable().scaledToFill()
+            
+            if isGroupChat {
+                groupNameField
+            }
+            
+            if isLoading {
+                ProgressView()
+                    .padding(.top, 16)
+            }
+            if let error = error {
+                Text(error)
+                    .foregroundColor(.red)
+                    .padding(.top, 8)
+            }
+            
+            List {
+                ForEach(results) { user in
+                    Button {
+                        toggleSelection(for: user)
+                    } label: {
+                        HStack(spacing: 16) {
+                            avatar(for: user)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(user.displayName)
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                Text("@\(user.username)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
-                            .frame(width: 44, height: 44)
-                            .clipShape(Circle())
-                        } else {
-                            Circle().fill(Color.purple.opacity(0.2)).frame(width: 44, height: 44)
+                            
+                            Spacer()
+                            
+                            if selectedUsers.contains(where: { $0.uid == user.uid }) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.purple)
+                            }
                         }
-                        VStack(alignment: .leading) {
-                            Text(user.displayName).font(.subheadline).fontWeight(.semibold)
-                            Text("@\(user.username)").font(.caption).foregroundColor(.secondary)
-                        }
-                        Spacer()
+                        .padding(.vertical, 6)
                     }
-                    .padding(.vertical, 4)
+                    .buttonStyle(.plain)
                 }
             }
             .listStyle(PlainListStyle())
+            
+            Button(action: startConversation) {
+                HStack {
+                    if isCreatingConversation {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    }
+                    Text(isGroupChat ? "Start Group Chat" : "Start Chat")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(canStartChat ? Color.purple : Color.gray.opacity(0.4))
+                .foregroundColor(.white)
+                .cornerRadius(14)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+            }
+            .disabled(!canStartChat)
         }
     }
-
+    
+    private var searchBar: some View {
+        HStack {
+            Image(systemName: "magnifyingglass").foregroundColor(.gray)
+            TextField("Search users", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+                .onSubmit { search() }
+            Button(action: search) {
+                Image(systemName: "arrow.clockwise")
+                    .foregroundColor(.purple)
+            }
+        }
+        .padding(12)
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+        .padding(.horizontal)
+        .padding(.top, 12)
+    }
+    
+    private var selectionChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(selectedUsers, id: \.uid) { user in
+                    HStack(spacing: 6) {
+                        Text(user.displayName)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                        Button(action: { removeSelection(user) }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption2)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.purple.opacity(0.15))
+                    .cornerRadius(16)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+        }
+    }
+    
+    private var groupNameField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Group Name")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            TextField("Auto-generated", text: $groupName)
+                .textFieldStyle(.roundedBorder)
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+    
+    private func avatar(for user: UserProfile) -> some View {
+        Group {
+            if let url = user.profilePictureUrl, let u = URL(string: url) {
+                AsyncImage(url: u) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Circle().fill(Color.purple.opacity(0.2))
+                }
+            } else {
+                Circle()
+                    .fill(Color.purple.opacity(0.2))
+                    .overlay(
+                        Text(user.displayName.prefix(1).uppercased())
+                            .font(.headline)
+                            .foregroundColor(.purple)
+                    )
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(Circle())
+    }
+    
+    private func toggleSelection(for user: UserProfile) {
+        if let index = selectedUsers.firstIndex(where: { $0.uid == user.uid }) {
+            selectedUsers.remove(at: index)
+        } else {
+            selectedUsers.append(user)
+        }
+    }
+    
+    private func removeSelection(_ user: UserProfile) {
+        selectedUsers.removeAll { $0.uid == user.uid }
+    }
+    
+    private func generatedGroupName() -> String {
+        let names = selectedUsers.map { $0.displayName }
+        if names.count <= 2 {
+            return names.joined(separator: ", ")
+        } else {
+            return "\(names[0]), \(names[1]) +\(names.count - 2)"
+        }
+    }
+    
+    private func startConversation() {
+        guard !selectedUsers.isEmpty, !isCreatingConversation else { return }
+        isCreatingConversation = true
+        let ids = selectedUsers.map { $0.uid }
+        let proposedName = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = proposedName.isEmpty ? (isGroupChat ? generatedGroupName() : nil) : proposedName
+        
+        DirectMessageService.shared.getOrCreateConversation(with: ids, groupName: finalName) { convo, error in
+            isCreatingConversation = false
+            if let error = error {
+                self.error = error.localizedDescription
+                return
+            }
+            if let convo = convo {
+                dismiss()
+                onConversationReady(convo)
+            }
+        }
+    }
+    
     private func search() {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { results = []; return }
@@ -308,6 +573,9 @@ struct ConversationView: View, Identifiable {
     let id = UUID()
     let conversation: Conversation
     let onDismiss: () -> Void
+    
+    @State private var fallbackDisplayName: String?
+    @State private var fallbackProfilePictureUrl: String?
 
     @State private var messages: [DirectMessage] = []
     @State private var hasMore: Bool = true
@@ -319,32 +587,90 @@ struct ConversationView: View, Identifiable {
     @State private var messagesListener: ListenerRegistration? = nil
     @State private var presenceListener: ListenerRegistration? = nil
     @State private var otherUserProfile: UserProfile? = nil
-    @State private var keyboardHeight: CGFloat = 0
-    @State private var showingUserProfile = false
+    @State private var participantProfiles: [String: UserProfile] = [:]
+    @State private var showParticipantsSheet = false
+    @State private var profileToShow: UserProfile?
     @State private var isHeaderPressed = false
+    
+    private var currentUserId: String? {
+        Auth.auth().currentUser?.uid
+    }
+    
+    private func otherUserId(_ conversation: Conversation) -> String? {
+        guard let current = currentUserId else { return nil }
+        return conversation.participantIds.first { $0 != current }
+    }
+
+    private var currentDisplayName: String {
+        primaryOtherProfile?.displayName ?? fallbackDisplayName ?? "User"
+    }
+    
+    private var currentProfilePictureUrl: String? {
+        if let profile = primaryOtherProfile {
+            return profile.profilePictureUrl
+                ?? profile.profileHeaderUrl
+                ?? fallbackProfilePictureUrl
+        }
+        return fallbackProfilePictureUrl
+    }
+    
+    private var primaryOtherProfile: UserProfile? {
+        if conversation.isGroupConversation {
+            if let current = currentUserId {
+                return participantProfiles.first(where: { $0.key != current })?.value
+            }
+            return participantProfiles.values.first
+        } else {
+            if let profile = otherUserProfile {
+                return profile
+            }
+            if let other = otherUserId(conversation) {
+                return participantProfiles[other]
+            }
+            return nil
+        }
+    }
+
+    init(conversation: Conversation,
+         onDismiss: @escaping () -> Void,
+         initialDisplayName: String? = nil,
+         initialProfilePictureUrl: String? = nil) {
+        self.conversation = conversation
+        self.onDismiss = onDismiss
+        _fallbackDisplayName = State(initialValue: initialDisplayName)
+        _fallbackProfilePictureUrl = State(initialValue: initialProfilePictureUrl)
+    }
 
     var body: some View {
-        GeometryReader { geometry in
+        ZStack {
+            Color(.systemBackground)
+                .ignoresSafeArea()
+            
             VStack(spacing: 0) {
-                // Custom Header
                 customHeader
                 
-                // Messages Area
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            // Load More Button
                             if hasMore {
-                                loadMoreButton
-                                    .padding(.top, 20)
+                                loadMoreTrigger
                             }
                             
-                            // Messages
+                            if isLoadingMore {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .scaleEffect(0.8)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 12)
+                            }
+                            
                             ForEach(messages) { msg in
+                                let isCurrent = msg.senderId == (currentUserId ?? "")
                                 EnhancedMessageBubble(
                                     message: msg,
-                                    isCurrentUser: msg.senderId == Auth.auth().currentUser?.uid,
-                                    otherUserProfile: otherUserProfile
+                                    isCurrentUser: isCurrent,
+                                    senderProfile: participantProfiles[msg.senderId],
+                                    showSenderName: conversation.isGroupConversation && !isCurrent
                                 )
                                 .id(msg.id)
                                 .transition(.asymmetric(
@@ -353,14 +679,17 @@ struct ConversationView: View, Identifiable {
                                 ))
                             }
                             
-                            // Typing Indicator
                             if isOtherTyping {
-                                TypingIndicatorView(otherUserProfile: otherUserProfile)
+                                TypingIndicatorView(
+                                    participantProfile: primaryOtherProfile,
+                                    isGroup: conversation.isGroupConversation
+                                )
                                     .transition(.scale.combined(with: .opacity))
                             }
                         }
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 20)
+                        .padding(.top, 12)
+                        .padding(.bottom, 16)
                     }
                     .onChange(of: messages.count) { _, _ in
                         withAnimation(.easeOut(duration: 0.3)) {
@@ -369,12 +698,12 @@ struct ConversationView: View, Identifiable {
                             }
                         }
                     }
+                    .onTapGesture { dismissKeyboard() }
                     .gesture(
                         DragGesture()
                             .onEnded { value in
                                 if value.translation.height > 50 {
-                                    // Swipe down detected - dismiss keyboard
-                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                                    dismissKeyboard()
                                 }
                             }
                     )
@@ -386,94 +715,73 @@ struct ConversationView: View, Identifiable {
                         endPoint: .bottom
                     )
                 )
-                
-                // Message Input
-                messageInputBar
             }
-            .background(Color(.systemBackground))
+        }
+        .safeAreaInset(edge: .bottom) {
+            messageInputBar
         }
         .onAppear(perform: attach)
         .onDisappear(perform: detach)
         .onChange(of: messages.count) { _, _ in markRead() }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
-            if let keyboardFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    keyboardHeight = keyboardFrame.cgRectValue.height
-                }
-            }
+        .sheet(isPresented: $showParticipantsSheet) {
+            participantsSheet
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            withAnimation(.easeOut(duration: 0.3)) {
-                keyboardHeight = 0
-            }
-        }
-        .fullScreenCover(isPresented: $showingUserProfile) {
-            if let otherUser = otherUserProfile {
-                NavigationView {
-                    UserProfileView(userId: otherUser.uid)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button("Back") {
-                                    showingUserProfile = false
-                                }
-                                .foregroundColor(.purple)
-                            }
-                        }
-                }
-            }
+        .fullScreenCover(item: $profileToShow) { profile in
+            // Show a lightweight profile (overview only) with a dismiss button
+            UserProfileView(
+                userId: profile.uid,
+                showFullProfile: false,
+                prefetchedProfile: profile,
+                showDismissButton: true
+            )
         }
     }
     
     // MARK: - Custom Header
     
     private var customHeader: some View {
-        HStack(spacing: 16) {
-            // Back Button
-            Button(action: onDismiss) {
-                HStack(spacing: 8) {
+        ZStack {
+            HStack {
+                Button(action: onDismiss) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 18, weight: .semibold))
-                    Text("Back")
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.purple)
                 }
-                .foregroundColor(.purple)
-            }
-            
-            Spacer()
-            
-            // User Info
-            if conversation.isBotConversation {
-                botHeaderContent
-            } else {
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.1)) {
-                        isHeaderPressed = true
+                Spacer()
+                if conversation.isGroupConversation {
+                    Button(action: { showParticipantsSheet = true }) {
+                        Image(systemName: "person.2.circle")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundColor(.purple)
                     }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        withAnimation(.easeInOut(duration: 0.1)) {
-                            isHeaderPressed = false
+                }
+            }
+            .padding(.horizontal, 16)
+            
+            HStack {
+                Spacer()
+                if conversation.isBotConversation {
+                    botHeaderContent
+                } else if conversation.isGroupConversation {
+                    groupHeaderContent
+                } else {
+                    Button(action: {
+                        if let profile = primaryOtherProfile {
+                            profileToShow = profile
                         }
-                        showingUserProfile = true
+                    }) {
+                        userHeaderContent
                     }
-                }) {
-                    userHeaderContent
+                    .buttonStyle(PlainButtonStyle())
                 }
-                .buttonStyle(PlainButtonStyle())
-                .scaleEffect(isHeaderPressed ? 0.95 : 1.0)
+                Spacer()
             }
-            
-            Spacer()
-            
-            // Action Buttons
-            headerActions
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .frame(height: 64)
         .background(
             Rectangle()
                 .fill(Color(.systemBackground))
-                .shadow(color: Color.black.opacity(0.1), radius: 1, x: 0, y: 1)
+                .shadow(color: Color.black.opacity(0.08), radius: 1, x: 0, y: 1)
         )
     }
     
@@ -500,12 +808,73 @@ struct ConversationView: View, Identifiable {
         }
     }
     
+    private var groupHeaderContent: some View {
+        VStack(spacing: 4) {
+            Button(action: { showParticipantsSheet = true }) {
+                HStack(spacing: 8) {
+                    groupAvatarPreview
+                    Text(conversation.groupName ?? "Group Chat")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Image(systemName: "chevron.down")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            
+            Text("\(conversation.participantIds.count) members")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    private var groupAvatarPreview: some View {
+        let others: [UserProfile]
+        if let current = currentUserId {
+            others = participantProfiles.filter { $0.key != current }.map { $0.value }
+        } else {
+            others = Array(participantProfiles.values)
+        }
+        let previews = Array(others.prefix(2))
+        return ZStack {
+            ForEach(Array(previews.enumerated()), id: \.offset) { index, profile in
+                avatarImage(for: profile)
+                    .frame(width: 34, height: 34)
+                    .offset(x: index == 0 ? -10 : 10)
+            }
+        }
+        .frame(width: 56, height: 36)
+    }
+    
+    private func avatarImage(for profile: UserProfile) -> some View {
+        AsyncImage(url: URL(string: profile.profilePictureUrl ?? profile.profileHeaderUrl ?? "")) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [.purple.opacity(0.6), .blue.opacity(0.4)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    Text(profile.displayName.prefix(1).uppercased())
+                        .font(.caption)
+                        .foregroundColor(.white)
+                )
+        }
+        .clipShape(Circle())
+    }
+    
     private var userHeaderContent: some View {
         VStack(spacing: 4) {
             // Profile Picture
             Group {
-                if let profile = otherUserProfile,
-                   let urlString = profile.profilePictureUrl,
+                if let urlString = currentProfilePictureUrl,
                    let url = URL(string: urlString) {
                     AsyncImage(url: url) { phase in
                         switch phase {
@@ -555,14 +924,9 @@ struct ConversationView: View, Identifiable {
             )
             
             // Username
-            Text(otherUserProfile?.displayName ?? "User")
+            Text(currentDisplayName)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.primary)
-                .lineLimit(1)
-            
-            Text("@\(otherUserProfile?.username ?? "user")")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.secondary)
                 .lineLimit(1)
         }
     }
@@ -593,35 +957,14 @@ struct ConversationView: View, Identifiable {
     
     // MARK: - Load More Button
     
-    private var loadMoreButton: some View {
-        Button(action: loadMore) {
-            HStack(spacing: 8) {
-                if isLoadingMore {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                        .tint(.purple)
-                } else {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 16))
+    private var loadMoreTrigger: some View {
+        Color.clear
+            .frame(height: 1)
+            .onAppear {
+                if hasMore && !isLoadingMore {
+                    loadMore()
                 }
-                
-                Text(isLoadingMore ? "Loading..." : "Load previous messages")
-                    .font(.system(size: 14, weight: .medium))
             }
-            .foregroundColor(.purple)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(Color.purple.opacity(0.1))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 20)
-                            .stroke(Color.purple.opacity(0.3), lineWidth: 1)
-                    )
-            )
-        }
-        .disabled(isLoadingMore)
-        .frame(maxWidth: .infinity)
     }
     
     // MARK: - Message Input Bar
@@ -630,7 +973,7 @@ struct ConversationView: View, Identifiable {
         VStack(spacing: 0) {
             Divider()
             
-            HStack(spacing: 12) {
+            HStack {
                 // Text Input
                 TextField("Type a message...", text: $text, axis: .vertical)
                     .font(.system(size: 16))
@@ -648,25 +991,13 @@ struct ConversationView: View, Identifiable {
                         }
                     }
                     .submitLabel(.send)
-                
-                // Send Button
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundColor(canSend ? .purple : .gray)
-                        .scaleEffect(canSend ? 1.0 : 0.8)
-                        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: canSend)
-                }
-                .disabled(!canSend)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
             .background(Color(.systemBackground))
         }
         .frame(maxWidth: .infinity)
         .background(Color(.systemBackground))
-        .offset(y: -keyboardHeight)
-        .animation(.easeOut(duration: 0.25), value: keyboardHeight)
     }
     
     private var canSend: Bool {
@@ -674,23 +1005,20 @@ struct ConversationView: View, Identifiable {
     }
     
     private func handleTyping() {
-        if let uid = Auth.auth().currentUser?.uid {
-            typingTask?.cancel()
-            let currentIsTyping = !text.isEmpty
-            typingTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                if !Task.isCancelled {
-                    DirectMessageService.shared.setTyping(conversationId: conversation.id, userId: uid, isTyping: currentIsTyping)
-                }
+        guard let uid = currentUserId else { return }
+        typingTask?.cancel()
+        let currentIsTyping = !text.isEmpty
+        typingTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if !Task.isCancelled {
+                DirectMessageService.shared.setTyping(conversationId: conversation.id, userId: uid, isTyping: currentIsTyping)
             }
         }
     }
 
     private var isRequestForMe: Bool {
-        if let uid = Auth.auth().currentUser?.uid {
-            return conversation.requestFor.contains(uid)
-        }
-        return false
+        guard let uid = currentUserId else { return false }
+        return conversation.requestFor.contains(uid)
     }
 
     private func attach() {
@@ -699,30 +1027,40 @@ struct ConversationView: View, Identifiable {
             messages = msgs
             hasMore = !msgs.isEmpty // naive; real check would compare to total
         }
-        if let uid = Auth.auth().currentUser?.uid {
+        if let uid = currentUserId {
             presenceListener = DirectMessageService.shared.observeOtherTyping(conversationId: conversation.id, currentUserId: uid) { typing in
                 isOtherTyping = typing
             }
         }
         
-        // Fetch other user profile
-        fetchOtherUserProfile()
+        fetchParticipantProfiles()
     }
     
-    private func fetchOtherUserProfile() {
-        guard !conversation.isBotConversation else { return }
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
-        guard let otherUserId = conversation.participantIds.first(where: { $0 != currentUserId }) else { return }
-        
-        Firestore.firestore().collection("users").document(otherUserId).getDocument { snapshot, error in
-            if let error = error {
-                print("❌ Error fetching user profile: \(error.localizedDescription)")
-                return
+    private func fetchParticipantProfiles() {
+        Task {
+            var fetched: [String: UserProfile] = [:]
+            for uid in conversation.participantIds {
+            if let profile = await UserProfileCache.shared.getProfile(userId: uid) {
+                fetched[uid] = profile
+                continue
             }
             
-            if let snapshot = snapshot, let profile = try? snapshot.data(as: UserProfile.self) {
-                DispatchQueue.main.async {
-                    self.otherUserProfile = profile
+            do {
+                let snapshot = try await Firestore.firestore().collection("users").document(uid).getDocument()
+                if let profile = try? snapshot.data(as: UserProfile.self) {
+                    fetched[uid] = profile
+                }
+            } catch {
+                print("❌ Error fetching participant profile: \(error.localizedDescription)")
+            }
+            }
+            
+            await MainActor.run {
+                self.participantProfiles = fetched
+                if !conversation.isGroupConversation,
+                   let current = currentUserId,
+                   let other = fetched.first(where: { $0.key != current })?.value {
+                    self.otherUserProfile = other
                 }
             }
         }
@@ -760,6 +1098,41 @@ struct ConversationView: View, Identifiable {
         }
     }
 
+    private var participantsSheet: some View {
+        NavigationStack {
+            List {
+                ForEach(participantProfiles.values.sorted(by: { $0.displayName < $1.displayName })) { profile in
+                    Button(action: {
+                        profileToShow = profile
+                        showParticipantsSheet = false
+                    }) {
+                        HStack(spacing: 12) {
+                            avatarImage(for: profile)
+                                .frame(width: 44, height: 44)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(profile.displayName)
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                Text("@\(profile.username)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle("Participants")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Close") { showParticipantsSheet = false }
+                }
+            }
+        }
+    }
+
     private func loadMore() {
         guard !isLoadingMore else { return }
         isLoadingMore = true
@@ -778,6 +1151,10 @@ struct ConversationView: View, Identifiable {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         DirectMessageService.shared.markConversationRead(conversationId: conversation.id, userId: uid, completion: nil)
     }
+    
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
 }
 
 // MARK: - Enhanced Message Bubble
@@ -785,7 +1162,11 @@ struct ConversationView: View, Identifiable {
 struct EnhancedMessageBubble: View {
     let message: DirectMessage
     let isCurrentUser: Bool
-    let otherUserProfile: UserProfile?
+    let senderProfile: UserProfile?
+    let showSenderName: Bool
+    @State private var showSafetyMenu = false
+    @State private var showReportSheet = false
+    @State private var showBlockSheet = false
     
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -793,52 +1174,51 @@ struct EnhancedMessageBubble: View {
                 Spacer(minLength: 60)
                 messageContent
             } else {
-                // Other user's avatar
-                Group {
-                    if let profile = otherUserProfile,
-                       let urlString = profile.profilePictureUrl,
-                       let url = URL(string: urlString) {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                            case .failure(_), .empty:
-                                Circle()
-                                    .fill(Color.purple.opacity(0.3))
-                                    .overlay(
-                                        Image(systemName: "person.fill")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(.white)
-                                    )
-                            @unknown default:
-                                Circle().fill(Color.gray.opacity(0.3))
-                            }
-                        }
-                    } else {
-                        Circle()
-                            .fill(Color.purple.opacity(0.3))
-                            .overlay(
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.white)
-                            )
-                    }
-                }
-                .frame(width: 28, height: 28)
-                .clipShape(Circle())
-                
+                avatar
                 messageContent
+                menuButton
                 Spacer(minLength: 60)
             }
         }
         .padding(.horizontal, 4)
     }
     
+    private var avatar: some View {
+        Group {
+            if let urlString = senderProfile?.profilePictureUrl,
+               let url = URL(string: urlString) {
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image {
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Circle().fill(Color.purple.opacity(0.3))
+                    }
+                }
+            } else {
+                Circle()
+                    .fill(Color.purple.opacity(0.3))
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white)
+                    )
+            }
+        }
+        .frame(width: 28, height: 28)
+        .clipShape(Circle())
+    }
+    
     private var messageContent: some View {
-        VStack(alignment: isCurrentUser ? .trailing : .leading, spacing: 2) {
-            // Message bubble
+        VStack(alignment: isCurrentUser ? .trailing : .leading, spacing: 4) {
+            if showSenderName, let name = senderProfile?.displayName {
+                Text(name)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.secondary)
+            }
+            
             Text(message.text)
                 .font(.system(size: 16))
                 .foregroundColor(isCurrentUser ? .white : .primary)
@@ -862,11 +1242,45 @@ struct EnhancedMessageBubble: View {
                         .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
                 )
             
-            // Timestamp
             Text(formatTime(message.createdAt))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 4)
+        }
+    }
+
+    private var menuButton: some View {
+        Menu {
+            ReportMenuButton(
+                contentId: message.id,
+                contentType: .chatMessage,
+                reportedUserId: message.senderId,
+                reportedUsername: senderProfile?.username ?? senderProfile?.displayName ?? "user",
+                contentPreview: message.text,
+                onReport: { showReportSheet = true },
+                onBlock: { showBlockSheet = true }
+            )
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.trailing, 8)
+        .sheet(isPresented: $showReportSheet) {
+            ReportContentView(
+                contentId: message.id,
+                contentType: .chatMessage,
+                reportedUserId: message.senderId,
+                reportedUsername: senderProfile?.username ?? senderProfile?.displayName ?? "user",
+                contentPreview: message.text
+            )
+        }
+        .sheet(isPresented: $showBlockSheet) {
+            BlockUserView(
+                userId: message.senderId,
+                username: senderProfile?.username ?? senderProfile?.displayName ?? "user",
+                profilePictureUrl: senderProfile?.profilePictureUrl
+            )
         }
     }
     
@@ -889,75 +1303,84 @@ struct EnhancedMessageBubble: View {
 // MARK: - Typing Indicator
 
 struct TypingIndicatorView: View {
-    let otherUserProfile: UserProfile?
+    let participantProfile: UserProfile?
+    let isGroup: Bool
     @State private var animating = false
     
     var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            // Avatar
-            Group {
-                if let profile = otherUserProfile,
-                   let urlString = profile.profilePictureUrl,
-                   let url = URL(string: urlString) {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        case .failure(_), .empty:
-                            Circle()
-                                .fill(Color.purple.opacity(0.3))
-                                .overlay(
-                                    Image(systemName: "person.fill")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(.white)
-                                )
-                        @unknown default:
-                            Circle().fill(Color.gray.opacity(0.3))
-                        }
-                    }
-                } else {
-                    Circle()
-                        .fill(Color.purple.opacity(0.3))
-                        .overlay(
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.white)
-                        )
-                }
+        if isGroup {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("\(participantProfile?.displayName ?? "Someone") is typing…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                indicatorDots
             }
-            .frame(width: 28, height: 28)
-            .clipShape(Circle())
-            
-            // Typing animation
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { index in
-                    Circle()
-                        .fill(Color.secondary)
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(animating ? 1.0 : 0.5)
-                        .animation(
-                            .easeInOut(duration: 0.6)
-                                .repeatForever()
-                                .delay(Double(index) * 0.2),
-                            value: animating
-                        )
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(Color(.systemGray5))
-                    .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(.systemGray6))
             )
-            
-            Spacer(minLength: 60)
+            .padding(.horizontal, 4)
+        } else {
+            HStack(alignment: .bottom, spacing: 8) {
+                avatar
+                indicatorDots
+                Spacer(minLength: 60)
+            }
+            .padding(.horizontal, 4)
         }
-        .padding(.horizontal, 4)
-        .onAppear {
-            animating = true
+    }
+    
+    private var avatar: some View {
+        Group {
+            if let urlString = participantProfile?.profilePictureUrl,
+               let url = URL(string: urlString) {
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image {
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Circle().fill(Color.purple.opacity(0.3))
+                    }
+                }
+            } else {
+                Circle()
+                    .fill(Color.purple.opacity(0.3))
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white)
+                    )
+            }
         }
+        .frame(width: 28, height: 28)
+        .clipShape(Circle())
+    }
+    
+    private var indicatorDots: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(Color.secondary)
+                    .frame(width: 6, height: 6)
+                    .scaleEffect(animating ? 1.0 : 0.5)
+                    .animation(
+                        .easeInOut(duration: 0.6)
+                            .repeatForever()
+                            .delay(Double(index) * 0.2),
+                        value: animating
+                    )
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(.systemGray5))
+                .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
+        )
+        .onAppear { animating = true }
     }
 }

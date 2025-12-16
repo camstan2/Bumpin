@@ -6,70 +6,158 @@ final class DirectMessageService {
     static let shared = DirectMessageService()
     private init() {}
     private var db: Firestore { Firestore.firestore() }
-
-    private func isMutual(a: UserProfile, b: UserProfile) -> Bool {
-        let aFollowsB = a.following?.contains(b.uid) ?? false
-        let bFollowsA = b.followers?.contains(a.uid) ?? false
-        return aFollowsB && bFollowsA
-    }
-
-    func getOrCreateConversation(with otherUserId: String, completion: @escaping (Conversation?, Error?) -> Void) {
-        guard let myId = Auth.auth().currentUser?.uid else { completion(nil, NSError(domain: "auth", code: 401)); return }
-        let key = Conversation.makeParticipantKey([myId, otherUserId])
-        db.collection("conversations").whereField("participantKey", isEqualTo: key).limit(to: 1).getDocuments { snap, err in
-            if let err = err { completion(nil, err); return }
-            if let doc = snap?.documents.first, let existing = try? doc.data(as: Conversation.self) {
-                completion(existing, nil)
-                return
-            }
-            // Create
-            let users = self.db.collection("users")
-            users.document(myId).getDocument { meDoc, _ in
-                users.document(otherUserId).getDocument { otherDoc, _ in
-                    let me = try? meDoc?.data(as: UserProfile.self)
-                    let other = try? otherDoc?.data(as: UserProfile.self)
-                    let mutual = (me != nil && other != nil) ? self.isMutual(a: me!, b: other!) : false
-                    let convo = Conversation(
-                        id: UUID().uuidString,
-                        participantIds: [myId, otherUserId],
-                        participantKey: key,
-                        inboxFor: mutual ? [myId, otherUserId] : [myId],
-                        requestFor: mutual ? [] : [otherUserId],
-                        lastMessage: nil,
-                        lastTimestamp: nil,
-                        lastReadAtByUser: [:]
-                    )
-                    do {
-                        try self.db.collection("conversations").document(convo.id).setData(from: convo) { writeErr in
-                            completion(writeErr == nil ? convo : nil, writeErr)
-                        }
-                    } catch {
-                        completion(nil, error)
-                    }
-                }
+    
+    private enum DMError: LocalizedError {
+        case unauthenticated
+        
+        var errorDescription: String? {
+            switch self {
+            case .unauthenticated: return "You must be signed in to send messages."
             }
         }
     }
-
+    
+    // MARK: - Conversation Management
+    
+    func getOrCreateConversation(with otherUserId: String, completion: @escaping (Conversation?, Error?) -> Void) {
+        getOrCreateConversation(with: [otherUserId], groupName: nil, completion: completion)
+    }
+    
+    func getOrCreateConversation(with participantIds: [String], groupName: String? = nil, completion: @escaping (Conversation?, Error?) -> Void) {
+        guard let currentUserId = Auth.auth().currentUser?.uid else {
+            completion(nil, DMError.unauthenticated)
+            return
+        }
+        
+        var uniqueIds = Set(participantIds)
+        uniqueIds.remove(currentUserId)
+        uniqueIds.insert(currentUserId)
+        let participants = Array(uniqueIds)
+        
+        Task {
+            do {
+                let conversation = try await self.findOrCreateConversation(
+                    participantIds: participants,
+                    groupName: groupName,
+                    initiator: currentUserId
+                )
+                completion(conversation, nil)
+            } catch {
+                completion(nil, error)
+            }
+        }
+    }
+    
+    private func findOrCreateConversation(participantIds: [String], groupName: String?, initiator: String) async throws -> Conversation {
+        let sortedIds = participantIds.sorted()
+        let participantKey = Conversation.makeParticipantKey(sortedIds)
+        
+        if sortedIds.count == 2 {
+            let snapshot = try await db.collection("conversations")
+                .whereField("participantKey", isEqualTo: participantKey)
+                .limit(to: 1)
+                .getDocuments()
+            if let existing = snapshot.documents.compactMap({ try? $0.data(as: Conversation.self) }).first {
+                return existing
+            }
+        }
+        
+        return try await createConversation(
+            participantIds: sortedIds,
+            participantKey: participantKey,
+            groupName: groupName,
+            initiator: initiator
+        )
+    }
+    
+    private func createConversation(participantIds: [String],
+                                    participantKey: String,
+                                    groupName: String?,
+                                    initiator: String) async throws -> Conversation {
+        let docRef = db.collection("conversations").document()
+        let meta = await computeInboxMetadata(initiator: initiator, participantIds: participantIds)
+        let type: Conversation.ConversationType = participantIds.count > 2 ? .group : .regular
+        
+        let name: String?
+        if type == .group {
+            if let provided = groupName, !provided.isEmpty {
+                name = provided
+            } else {
+                name = await defaultGroupName(participantIds: participantIds, excluding: initiator)
+            }
+        } else {
+            name = nil
+        }
+        let now = Date()
+        
+        let conversation = Conversation(
+            id: docRef.documentID,
+            participantIds: participantIds,
+            participantKey: participantKey,
+            participantCount: participantIds.count,
+            createdBy: initiator,
+            groupName: name,
+            groupAvatarUrl: nil,
+            inboxFor: meta.inbox,
+            requestFor: meta.requests,
+            lastMessage: nil,
+            lastSenderId: nil,
+            lastTimestamp: now,
+            lastReadAtByUser: [initiator: now],
+            conversationType: type
+        )
+        
+        try docRef.setData(from: conversation)
+        return conversation
+    }
+    
+    // MARK: - Messaging
+    
     func sendMessage(conversationId: String, text: String, completion: @escaping (Error?) -> Void) {
-        guard let myId = Auth.auth().currentUser?.uid else { completion(NSError(domain: "auth", code: 401)); return }
-        let msg = DirectMessage(id: UUID().uuidString, conversationId: conversationId, senderId: myId, text: text, createdAt: Date(), isSystem: nil, readBy: [myId])
+        guard let myId = Auth.auth().currentUser?.uid else {
+            completion(DMError.unauthenticated)
+            return
+        }
+        
+        let message = DirectMessage(
+            id: UUID().uuidString,
+            conversationId: conversationId,
+            senderId: myId,
+            text: text,
+            createdAt: Date(),
+            isSystem: nil,
+            readBy: [myId],
+            attachments: nil,
+            replyToMessageId: nil,
+            status: .sent
+        )
+        
         let convoRef = db.collection("conversations").document(conversationId)
         do {
-            try convoRef.collection("messages").document(msg.id).setData(from: msg) { err in
-                if let err = err { completion(err); return }
+            try convoRef.collection("messages").document(message.id).setData(from: message) { [weak self] error in
+                if let error = error {
+                    completion(error)
+                    return
+                }
+                
                 convoRef.updateData([
                     "lastMessage": text,
-                    "lastTimestamp": FieldValue.serverTimestamp()
-                ]) { metaErr in
-                    completion(metaErr)
+                    "lastSenderId": myId,
+                    "lastTimestamp": FieldValue.serverTimestamp(),
+                    "lastReadAtByUser.\(myId)": FieldValue.serverTimestamp()
+                ]) { metaError in
+                    completion(metaError)
+                }
+                
+                Task {
+                    await self?.refreshInboxStateIfNeeded(conversationId: conversationId, senderId: myId)
                 }
             }
         } catch {
             completion(error)
         }
     }
-
+    
     // Mark messages read up to the newest message for this user
     func markConversationRead(conversationId: String, userId: String, completion: ((Error?) -> Void)? = nil) {
         let convoRef = db.collection("conversations").document(conversationId)
@@ -79,7 +167,7 @@ final class DirectMessageService {
             completion?(err)
         }
     }
-
+    
     func acceptRequest(conversationId: String, userId: String, completion: @escaping (Error?) -> Void) {
         let ref = db.collection("conversations").document(conversationId)
         ref.updateData([
@@ -87,55 +175,81 @@ final class DirectMessageService {
             "requestFor": FieldValue.arrayRemove([userId])
         ], completion: completion)
     }
-
+    
     func declineRequest(conversationId: String, userId: String, completion: @escaping (Error?) -> Void) {
-        // Remove user from requestFor and inboxFor so it no longer appears in their lists
         let ref = db.collection("conversations").document(conversationId)
         ref.updateData([
             "requestFor": FieldValue.arrayRemove([userId]),
             "inboxFor": FieldValue.arrayRemove([userId])
         ], completion: completion)
     }
-
+    
+    // MARK: - Observers
+    
     func observeInbox(for userId: String? = Auth.auth().currentUser?.uid, onChange: @escaping ([Conversation]) -> Void) -> ListenerRegistration? {
         guard let uid = userId else { return nil }
-        let q = db.collection("conversations").whereField("inboxFor", arrayContains: uid).order(by: "lastTimestamp", descending: true)
-        return q.addSnapshotListener { snap, _ in
+        let q = db.collection("conversations")
+            .whereField("inboxFor", arrayContains: uid)
+            .order(by: "lastTimestamp", descending: true)
+        
+        return q.addSnapshotListener { [weak self] snap, _ in
             let items = snap?.documents.compactMap { try? $0.data(as: Conversation.self) } ?? []
-            onChange(items)
+            if let self {
+                onChange(self.deduplicateConversations(items))
+            } else {
+                onChange(items)
+            }
         }
     }
-
+    
     func observeRequests(for userId: String? = Auth.auth().currentUser?.uid, onChange: @escaping ([Conversation]) -> Void) -> ListenerRegistration? {
         guard let uid = userId else { return nil }
-        let q = db.collection("conversations").whereField("requestFor", arrayContains: uid).order(by: "lastTimestamp", descending: true)
-        return q.addSnapshotListener { snap, _ in
+        let q = db.collection("conversations")
+            .whereField("requestFor", arrayContains: uid)
+            .order(by: "lastTimestamp", descending: true)
+        
+        return q.addSnapshotListener { [weak self] snap, _ in
             let items = snap?.documents.compactMap { try? $0.data(as: Conversation.self) } ?? []
-            onChange(items)
+            if let self {
+                onChange(self.deduplicateConversations(items))
+            } else {
+                onChange(items)
+            }
         }
     }
-
+    
     func observeMessages(conversationId: String, limit: Int = 50, onChange: @escaping ([DirectMessage]) -> Void) -> ListenerRegistration {
-        let q = db.collection("conversations").document(conversationId).collection("messages").order(by: "createdAt", descending: false).limit(to: limit)
+        let q = db.collection("conversations")
+            .document(conversationId)
+            .collection("messages")
+            .order(by: "createdAt", descending: false)
+            .limit(to: limit)
+        
         return q.addSnapshotListener { snap, _ in
             let msgs = snap?.documents.compactMap { try? $0.data(as: DirectMessage.self) } ?? []
             onChange(msgs)
         }
     }
-
+    
     func fetchMoreMessages(conversationId: String, after message: DirectMessage?, limit: Int = 50, completion: @escaping ([DirectMessage], Error?) -> Void) {
-        var q: Query = db.collection("conversations").document(conversationId).collection("messages").order(by: "createdAt", descending: false).limit(to: limit)
+        var q: Query = db.collection("conversations").document(conversationId)
+            .collection("messages")
+            .order(by: "createdAt", descending: false)
+            .limit(to: limit)
+        
         if let message = message {
             q = q.start(after: [message.createdAt])
         }
+        
         q.getDocuments { snap, err in
             if let err = err { completion([], err); return }
             let msgs = snap?.documents.compactMap { try? $0.data(as: DirectMessage.self) } ?? []
             completion(msgs, nil)
         }
     }
-
+    
     // MARK: - Typing indicators (presence)
+    
     func setTyping(conversationId: String, userId: String, isTyping: Bool) {
         let ref = db.collection("conversations").document(conversationId)
             .collection("presence").document(userId)
@@ -144,7 +258,7 @@ final class DirectMessageService {
             "updatedAt": FieldValue.serverTimestamp()
         ], merge: true)
     }
-
+    
     func observeOtherTyping(conversationId: String, currentUserId: String, onChange: @escaping (Bool) -> Void) -> ListenerRegistration {
         let presence = db.collection("conversations").document(conversationId).collection("presence")
         return presence.addSnapshotListener { snap, _ in
@@ -154,10 +268,159 @@ final class DirectMessageService {
                 guard uid != currentUserId else { return false }
                 let data = doc.data()
                 let typing = data["typing"] as? Bool ?? false
-                // Optional: ignore stale updates (older than ~10s) if needed
                 return typing
             }
             onChange(someoneElseTyping)
         }
+    }
+    
+    // MARK: - Helpers
+    
+    private func defaultGroupName(participantIds: [String], excluding initiator: String) async -> String {
+        let others = participantIds.filter { $0 != initiator }
+        var displayNames: [String] = []
+        for uid in others.prefix(2) {
+            if let profile = await UserProfileCache.shared.getProfile(userId: uid) {
+                displayNames.append(profile.displayName)
+            }
+        }
+        
+        if displayNames.isEmpty {
+            return "Group Chat"
+        } else if others.count <= 2 {
+            return displayNames.joined(separator: ", ")
+        } else {
+            let remaining = others.count - displayNames.count
+            return "\(displayNames.joined(separator: ", ")), +\(remaining)"
+        }
+    }
+    
+    private func computeInboxMetadata(initiator: String, participantIds: [String]) async -> (inbox: [String], requests: [String]) {
+        var inbox = Set<String>([initiator])
+        var requests = Set<String>()
+        
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for uid in participantIds where uid != initiator {
+                group.addTask {
+                    let mutual = await self.areMutualFollowers(uid, initiator: initiator)
+                    return (uid, mutual)
+                }
+            }
+            
+            for await result in group {
+                if result.1 {
+                    inbox.insert(result.0)
+                } else {
+                    requests.insert(result.0)
+                }
+            }
+        }
+        
+        return (Array(inbox), Array(requests))
+    }
+    
+    private func areMutualFollowers(_ userId: String, initiator: String) async -> Bool {
+        async let initiatorFollows = user(initiator, follows: userId)
+        async let userFollowsInitiator = user(userId, follows: initiator)
+        let results = await (initiatorFollows, userFollowsInitiator)
+        return results.0 && results.1
+    }
+    
+    private func user(_ userId: String, follows otherId: String) async -> Bool {
+        do {
+            let doc = try await db.collection("users").document(userId).collection("following").document(otherId).getDocument()
+            if doc.exists { return true }
+            
+            let fallback = try await db.collection("users").document(userId).getDocument()
+            if let profile = try? fallback.data(as: UserProfile.self), let following = profile.following {
+                return following.contains(otherId)
+            }
+            if let data = fallback.data(), let inline = data["following"] as? [String] {
+                return inline.contains(otherId)
+            }
+            return false
+        } catch {
+            print("Follow lookup failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+    
+    private func refreshInboxStateIfNeeded(conversationId: String, senderId: String) async {
+        do {
+            let snapshot = try await db.collection("conversations").document(conversationId).getDocument()
+            guard var conversation = try? snapshot.data(as: Conversation.self) else { return }
+            conversation.id = snapshot.documentID
+            
+            var inboxAdds: [String] = []
+            var requestAdds: [String] = []
+            var requestRemovals: [String] = []
+            
+            for participant in conversation.participantIds where participant != senderId {
+                let mutual = await areMutualFollowers(participant, initiator: senderId)
+                if mutual {
+                    if !conversation.inboxFor.contains(participant) {
+                        inboxAdds.append(participant)
+                    }
+                    if conversation.requestFor.contains(participant) {
+                        requestRemovals.append(participant)
+                    }
+                } else if !conversation.requestFor.contains(participant) && !conversation.inboxFor.contains(participant) {
+                    requestAdds.append(participant)
+                }
+            }
+            
+            var updates: [String: Any] = [:]
+            if !inboxAdds.isEmpty {
+                updates["inboxFor"] = FieldValue.arrayUnion(inboxAdds)
+            }
+            if !requestAdds.isEmpty {
+                updates["requestFor"] = FieldValue.arrayUnion(requestAdds)
+            }
+            
+            if !updates.isEmpty {
+                try await db.collection("conversations").document(conversationId).updateData(updates)
+            }
+            if !requestRemovals.isEmpty {
+                try await db.collection("conversations").document(conversationId).updateData([
+                    "requestFor": FieldValue.arrayRemove(requestRemovals)
+                ])
+            }
+        } catch {
+            print("refreshInboxState error: \(error.localizedDescription)")
+        }
+    }
+    
+    private func selectMostRecentConversation(from conversations: [Conversation]) -> Conversation? {
+        conversations
+            .sorted { ($0.lastTimestamp ?? Date.distantPast) > ($1.lastTimestamp ?? Date.distantPast) }
+            .first
+    }
+    
+    private func deduplicateConversations(_ conversations: [Conversation]) -> [Conversation] {
+        var bestByKey: [String: Conversation] = [:]
+        
+        for conversation in conversations {
+            let key = normalizedParticipantKey(for: conversation)
+            if let existing = bestByKey[key] {
+                let existingDate = existing.lastTimestamp ?? Date.distantPast
+                let newDate = conversation.lastTimestamp ?? Date.distantPast
+                if newDate > existingDate {
+                    bestByKey[key] = conversation
+                }
+            } else {
+                bestByKey[key] = conversation
+            }
+        }
+        
+        return bestByKey.values.sorted {
+            ($0.lastTimestamp ?? Date.distantPast) > ($1.lastTimestamp ?? Date.distantPast)
+        }
+    }
+    
+    private func normalizedParticipantKey(for conversation: Conversation) -> String {
+        if !conversation.participantKey.isEmpty {
+            return conversation.participantKey
+        }
+        return Conversation.makeParticipantKey(conversation.participantIds)
     }
 }

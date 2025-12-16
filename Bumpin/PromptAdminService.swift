@@ -40,9 +40,9 @@ class PromptAdminService: ObservableObject {
     // MARK: - Initialization
     
     init() {
-        Task {
-            await loadAllData()
-        }
+        // Empty init - data loading is deferred until explicitly requested
+        // This prevents permission errors for non-admin users who don't need admin data
+        // Admin UI should call loadAllData() when needed
     }
     
     // MARK: - Data Loading
@@ -120,12 +120,18 @@ class PromptAdminService: ObservableObject {
         activateImmediately: Bool = false
     ) async -> Bool {
         
+        print("📝 [Admin] Creating prompt: '\(title)'")
+        print("📝 [Admin] Activate immediately: \(activateImmediately)")
+        print("📝 [Admin] Scheduled date: \(scheduledDate?.description ?? "none")")
+        
         guard isAdmin else {
+            print("❌ [Admin] Not authorized - user is not admin")
             handleError(NSError(domain: "AdminError", code: 403, userInfo: [NSLocalizedDescriptionKey: "Admin access required"]))
             return false
         }
         
         guard let userId = Auth.auth().currentUser?.uid else {
+            print("❌ [Admin] Not authenticated")
             handleError(NSError(domain: "AuthError", code: 401, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"]))
             return false
         }
@@ -149,15 +155,24 @@ class PromptAdminService: ObservableObject {
             
             // Set activation status
             if activateImmediately {
+                print("⚡ [Admin] Deactivating existing prompts before activating new one")
                 // Deactivate any currently active prompts first
                 await deactivateAllPrompts()
                 prompt.isActive = true
+                print("✅ [Admin] Prompt will be activated immediately")
             } else {
                 prompt.date = scheduledDate ?? Date()
+                print("📅 [Admin] Prompt scheduled for: \(prompt.date)")
+                print("⏸️ [Admin] Prompt will NOT be active until manually activated")
             }
             
             // Save to Firestore
+            print("💾 [Admin] Saving prompt to Firestore...")
             try await db.collection("dailyPrompts").document(prompt.id).setData(from: prompt)
+            print("✅ [Admin] Prompt saved successfully with ID: \(prompt.id)")
+            print("   isActive: \(prompt.isActive)")
+            print("   date: \(prompt.date)")
+            print("   expiresAt: \(expirationDate)")
             
             // Update local state
             allPrompts.insert(prompt, at: 0)
@@ -165,8 +180,10 @@ class PromptAdminService: ObservableObject {
             if activateImmediately {
                 // Remove from scheduled, add to active
                 scheduledPrompts.removeAll { $0.isActive }
+                print("✅ [Admin] Active prompt updated in local state (computed from allPrompts)")
             } else if scheduledDate != nil {
                 scheduledPrompts.insert(prompt, at: 0)
+                print("✅ [Admin] Prompt added to scheduled prompts list")
             }
             
             // Track analytics
@@ -177,9 +194,11 @@ class PromptAdminService: ObservableObject {
                 "has_description": description != nil
             ])
             
+            print("🎉 [Admin] Prompt creation completed successfully")
             return true
             
         } catch {
+            print("❌ [Admin] Error creating prompt: \(error.localizedDescription)")
             handleError(error)
             return false
         }
@@ -198,25 +217,36 @@ class PromptAdminService: ObservableObject {
     // MARK: - Prompt Management
     
     func activatePrompt(_ promptId: String) async -> Bool {
-        guard isAdmin else { return false }
+        print("⚡ [Admin] Activating prompt with ID: \(promptId)")
+        
+        guard isAdmin else {
+            print("❌ [Admin] Not authorized to activate prompt")
+            return false
+        }
         
         isUpdatingPrompt = true
         defer { isUpdatingPrompt = false }
         
         do {
+            print("⏸️ [Admin] Deactivating all currently active prompts...")
             // First deactivate all currently active prompts
             await deactivateAllPrompts()
             
             // Activate the selected prompt
+            print("💾 [Admin] Setting isActive=true in Firestore...")
             try await db.collection("dailyPrompts").document(promptId).updateData([
                 "isActive": true,
                 "date": FieldValue.serverTimestamp()
             ])
+            print("✅ [Admin] Prompt activated in Firestore")
             
             // Update local state
             if let index = allPrompts.firstIndex(where: { $0.id == promptId }) {
                 allPrompts[index].isActive = true
                 allPrompts[index].date = Date()
+                print("✅ [Admin] Local state updated - prompt is now active (activePrompt computed from allPrompts)")
+            } else {
+                print("⚠️ [Admin] Warning: Prompt not found in local allPrompts array")
             }
             
             // Remove from scheduled
@@ -227,9 +257,11 @@ class PromptAdminService: ObservableObject {
                 "prompt_id": promptId
             ])
             
+            print("🎉 [Admin] Prompt activation completed successfully")
             return true
             
         } catch {
+            print("❌ [Admin] Error activating prompt: \(error.localizedDescription)")
             handleError(error)
             return false
         }

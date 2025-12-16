@@ -1,399 +1,485 @@
 import Foundation
 import FirebaseFirestore
 import FirebaseAuth
-
-// MARK: - Notification Service
+import Combine
 
 @MainActor
 class NotificationService: ObservableObject {
-    
     static let shared = NotificationService()
     
     private let db = Firestore.firestore()
-    private var listeners: [ListenerRegistration] = []
+    @Published var unreadCount: Int = 0
     
-    @Published var unreadCount = 0
-    @Published var recentNotifications: [AppNotification] = []
+    private var unreadListener: ListenerRegistration?
     
-    private init() {}
-    
-    // MARK: - Create Notifications
-    
-    /// Create a new follower notification
-    func createFollowerNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String) {
-        let notification = AppNotification(
-            type: .newFollower,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("new_follower", fromUserId: fromUserId, toUserId: toUserId)
+    private init() {
+        startUnreadListener()
     }
     
-    /// Create a music log liked notification
-    func createMusicLogLikedNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String, songTitle: String, artistName: String, logId: String) {
-        let notification = AppNotification(
-            type: .musicLogLiked,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: logId,
-            contextTitle: songTitle,
-            contextSubtitle: artistName
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("music_log_liked", fromUserId: fromUserId, toUserId: toUserId)
+    deinit {
+        unreadListener?.remove()
     }
     
-    /// Create a music log commented notification
-    func createMusicLogCommentedNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String, songTitle: String, artistName: String, logId: String, commentText: String) {
-        let notification = AppNotification(
-            type: .musicLogCommented,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: logId,
-            contextTitle: songTitle,
-            contextSubtitle: artistName,
-            message: String(commentText.prefix(100)) // Preview of comment
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("music_log_commented", fromUserId: fromUserId, toUserId: toUserId)
-    }
+    // MARK: - Unread Count Listener
     
-    /// Create a party invite notification
-    func createPartyInviteNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String, partyId: String, partyName: String) {
-        let notification = AppNotification(
-            type: .partyInvite,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: partyId,
-            contextTitle: partyName
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("party_invite", fromUserId: fromUserId, toUserId: toUserId)
-    }
-    
-    /// Create a party joined notification
-    func createPartyJoinedNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String, partyId: String, partyName: String, memberCount: Int) {
-        let notification = AppNotification(
-            type: .partyJoined,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: partyId,
-            contextTitle: partyName,
-            contextSubtitle: "\(memberCount) members"
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("party_joined", fromUserId: fromUserId, toUserId: toUserId)
-    }
-    
-    /// Create a friend started party notification
-    func createFriendStartedPartyNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserIds: [String], partyId: String, partyName: String) {
-        let notification = AppNotification(
-            type: .friendStartedParty,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: partyId,
-            contextTitle: partyName
-        )
-        
-        for toUserId in toUserIds {
-            saveNotification(notification, toUserId: toUserId)
-        }
-        logAnalytics("friend_started_party", fromUserId: fromUserId, toUserId: nil)
-    }
-    
-    /// Create a new daily prompt notification
-    func createNewDailyPromptNotification(promptId: String, promptTitle: String, toUserIds: [String]) {
-        let notification = AppNotification(
-            type: .newDailyPrompt,
-            contextId: promptId,
-            contextTitle: promptTitle
-        )
-        
-        for toUserId in toUserIds {
-            saveNotification(notification, toUserId: toUserId)
-        }
-        logAnalytics("new_daily_prompt", fromUserId: nil, toUserId: nil)
-    }
-    
-    /// Create a prompt response liked notification
-    func createPromptResponseLikedNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String, promptId: String, responseId: String) {
-        let notification = AppNotification(
-            type: .promptResponseLiked,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: responseId
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("prompt_response_liked", fromUserId: fromUserId, toUserId: toUserId)
-    }
-    
-    /// Create a DJ stream started notification
-    func createDJStreamStartedNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserIds: [String], streamId: String, streamTitle: String) {
-        let notification = AppNotification(
-            type: .djStreamStarted,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: streamId,
-            contextTitle: streamTitle
-        )
-        
-        for toUserId in toUserIds {
-            saveNotification(notification, toUserId: toUserId)
-        }
-        logAnalytics("dj_stream_started", fromUserId: fromUserId, toUserId: nil)
-    }
-    
-    /// Create a new message notification
-    func createNewMessageNotification(fromUserId: String, fromUserName: String, fromUserUsername: String, fromUserProfilePictureUrl: String?, toUserId: String, conversationId: String, messagePreview: String) {
-        let notification = AppNotification(
-            type: .newMessage,
-            fromUserId: fromUserId,
-            fromUserName: fromUserName,
-            fromUserUsername: fromUserUsername,
-            fromUserProfilePictureUrl: fromUserProfilePictureUrl,
-            contextId: conversationId,
-            message: messagePreview
-        )
-        
-        saveNotification(notification, toUserId: toUserId)
-        logAnalytics("new_message", fromUserId: fromUserId, toUserId: toUserId)
-    }
-    
-    /// Create a system notification
-    func createSystemNotification(type: NotificationType, title: String, message: String, toUserIds: [String]) {
-        let notification = AppNotification(
-            type: type,
-            contextTitle: title,
-            message: message
-        )
-        
-        for toUserId in toUserIds {
-            saveNotification(notification, toUserId: toUserId)
-        }
-        logAnalytics("system_notification", fromUserId: nil, toUserId: nil)
-    }
-    
-    // MARK: - Private Helper Methods
-    
-    private func saveNotification(_ notification: AppNotification, toUserId: String) {
-        do {
-            let data = try Firestore.Encoder().encode(notification)
-            db.collection("users").document(toUserId).collection("notifications")
-                .document(notification.notificationId)
-                .setData(data) { error in
-                    if let error = error {
-                        print("❌ Error saving notification: \(error.localizedDescription)")
-                    } else {
-                        print("✅ Notification saved successfully")
-                    }
-                }
-        } catch {
-            print("❌ Error encoding notification: \(error.localizedDescription)")
-        }
-    }
-    
-    private func logAnalytics(_ event: String, fromUserId: String?, toUserId: String?) {
-        var parameters: [String: Any] = [:]
-        if let fromUserId = fromUserId {
-            parameters["from_user_id"] = fromUserId
-        }
-        if let toUserId = toUserId {
-            parameters["to_user_id"] = toUserId
-        }
-        parameters["timestamp"] = Date().timeIntervalSince1970
-        
-        AnalyticsService.shared.logEvent("notification_\(event)", parameters: parameters)
-    }
-    
-    // MARK: - Notification Management
-    
-    /// Start listening for notifications for the current user
-    func startListening() {
+    func startUnreadListener() {
         guard let currentUserId = Auth.auth().currentUser?.uid else { return }
         
-        let listener = db.collection("users").document(currentUserId).collection("notifications")
-            .order(by: "timestamp", descending: true)
-            .limit(to: 50)
+        unreadListener = db.collection("users")
+            .document(currentUserId)
+            .collection("notifications")
+            .whereField("isRead", isEqualTo: false)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self = self else { return }
                 
                 if let error = error {
-                    print("❌ Error listening to notifications: \(error.localizedDescription)")
+                    print("❌ Error listening to unread notifications: \(error)")
                     return
                 }
                 
-                guard let documents = snapshot?.documents else { return }
-                
-                Task { @MainActor in
-                    self.recentNotifications = documents.compactMap { doc in
-                        let data = doc.data()
-                        guard let typeString = data["type"] as? String,
-                              let type = NotificationType(rawValue: typeString),
-                              let timestamp = (data["timestamp"] as? Timestamp)?.dateValue() else {
-                            return nil
-                        }
-                        
-                        return AppNotification(
-                            notificationId: doc.documentID,
-                            type: type,
-                            timestamp: timestamp,
-                            isRead: data["isRead"] as? Bool ?? false,
-                            fromUserId: data["fromUserId"] as? String,
-                            fromUserName: data["fromUserName"] as? String,
-                            fromUserUsername: data["fromUserUsername"] as? String,
-                            fromUserProfilePictureUrl: data["fromUserProfilePictureUrl"] as? String,
-                            contextId: data["contextId"] as? String,
-                            contextTitle: data["contextTitle"] as? String,
-                            contextSubtitle: data["contextSubtitle"] as? String,
-                            contextImageUrl: data["contextImageUrl"] as? String,
-                            message: data["message"] as? String
-                        )
-                    }
-                    
-                    self.unreadCount = self.recentNotifications.filter { !$0.isRead }.count
+                self.unreadCount = snapshot?.documents.count ?? 0
+                print("🔔 Unread notifications: \(self.unreadCount)")
+            }
+    }
+    
+    // MARK: - Create Notifications
+    
+    /// Create a follow notification
+    func createFollowNotification(followedUserId: String) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              currentUserId != followedUserId else { return }
+        
+        do {
+            // Get current user info
+            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
+            let username = userDoc.data()?["username"] as? String ?? "Someone"
+            let displayName = userDoc.data()?["displayName"] as? String ?? username
+            let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+            
+        let notification = AppNotification(
+            type: .newFollower,
+                fromUserId: currentUserId,
+                fromUserName: displayName,
+                fromUserUsername: username,
+                fromUserProfilePictureUrl: profilePictureUrl
+            )
+            
+            try await saveNotification(notification, toUserId: followedUserId)
+            print("✅ Follow notification created")
+        } catch {
+            print("❌ Error creating follow notification: \(error)")
+        }
+    }
+    
+    /// Create a like notification
+    func createLikeNotification(logId: String, logOwnerId: String, log: MusicLog) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              currentUserId != logOwnerId else { return }
+        
+        do {
+            // Get current user info
+            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
+            let username = userDoc.data()?["username"] as? String ?? "Someone"
+            let displayName = userDoc.data()?["displayName"] as? String ?? username
+            let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+            
+            // For now, create individual notifications (grouping will be implemented later)
+            
+        let notification = AppNotification(
+                type: .musicLogLiked,
+                fromUserId: currentUserId,
+                fromUserName: displayName,
+                fromUserUsername: username,
+                fromUserProfilePictureUrl: profilePictureUrl,
+            contextId: logId,
+                contextTitle: log.title,
+                contextSubtitle: log.artistName,
+                contextImageUrl: log.artworkUrl
+            )
+            
+            try await saveNotification(notification, toUserId: logOwnerId, groupedUserIds: [currentUserId])
+            print("✅ Like notification created")
+        } catch {
+            print("❌ Error creating like notification: \(error)")
+        }
+    }
+    
+    /// Create a comment notification
+    func createCommentNotification(logId: String, logOwnerId: String, log: MusicLog, commentText: String) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              currentUserId != logOwnerId else { return }
+        
+        do {
+            // Get current user info
+            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
+            let username = userDoc.data()?["username"] as? String ?? "Someone"
+            let displayName = userDoc.data()?["displayName"] as? String ?? username
+            let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+            
+            // Truncate comment if too long
+            let maxLength = 100
+            let truncatedComment = commentText.count > maxLength ? 
+                String(commentText.prefix(maxLength)) + "..." : commentText
+            
+        let notification = AppNotification(
+                type: .musicLogCommented,
+                fromUserId: currentUserId,
+                fromUserName: displayName,
+                fromUserUsername: username,
+                fromUserProfilePictureUrl: profilePictureUrl,
+                contextId: logId,
+                contextTitle: log.title,
+                contextSubtitle: log.artistName,
+                contextImageUrl: log.artworkUrl,
+                message: truncatedComment
+            )
+            
+            try await saveNotification(notification, toUserId: logOwnerId)
+            print("✅ Comment notification created")
+        } catch {
+            print("❌ Error creating comment notification: \(error)")
+        }
+    }
+    
+    /// Create a repost notification
+    func createRepostNotification(logId: String, logOwnerId: String, log: MusicLog) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              currentUserId != logOwnerId else { return }
+        
+        do {
+            // Get current user info
+            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
+            let username = userDoc.data()?["username"] as? String ?? "Someone"
+            let displayName = userDoc.data()?["displayName"] as? String ?? username
+            let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+            
+            // For now, create individual notifications (grouping will be implemented later)
+            
+        let notification = AppNotification(
+                type: .musicLogReposted,
+                fromUserId: currentUserId,
+                fromUserName: displayName,
+                fromUserUsername: username,
+                fromUserProfilePictureUrl: profilePictureUrl,
+                contextId: logId,
+                contextTitle: log.title,
+                contextSubtitle: log.artistName,
+                contextImageUrl: log.artworkUrl
+            )
+            
+            try await saveNotification(notification, toUserId: logOwnerId, groupedUserIds: [currentUserId])
+            print("✅ Repost notification created")
+        } catch {
+            print("❌ Error creating repost notification: \(error)")
+        }
+    }
+    
+    /// Create a dislike notification
+    func createDislikeNotification(logId: String, logOwnerId: String, log: MusicLog) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              currentUserId != logOwnerId else { return }
+        
+        do {
+            // Get current user info
+            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
+            let username = userDoc.data()?["username"] as? String ?? "Someone"
+            let displayName = userDoc.data()?["displayName"] as? String ?? username
+            let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+            
+            // For now, create individual notifications (grouping will be implemented later)
+            
+        let notification = AppNotification(
+                type: .musicLogDisliked,
+                fromUserId: currentUserId,
+                fromUserName: displayName,
+                fromUserUsername: username,
+                fromUserProfilePictureUrl: profilePictureUrl,
+                contextId: logId,
+                contextTitle: log.title,
+                contextSubtitle: log.artistName,
+                contextImageUrl: log.artworkUrl
+            )
+            
+            try await saveNotification(notification, toUserId: logOwnerId, groupedUserIds: [currentUserId])
+            print("✅ Dislike notification created")
+        } catch {
+            print("❌ Error creating dislike notification: \(error)")
+        }
+    }
+    
+    /// Create a mention notification (in comment, reply, or caption)
+    func createMentionNotification(mentionedUserId: String, contentType: String, contentId: String, logId: String, log: MusicLog, mentionText: String) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid,
+              currentUserId != mentionedUserId else { return }
+        
+        do {
+            // Get current user info
+            let userDoc = try await db.collection("users").document(currentUserId).getDocument()
+            let username = userDoc.data()?["username"] as? String ?? "Someone"
+            let displayName = userDoc.data()?["displayName"] as? String ?? username
+            let profilePictureUrl = userDoc.data()?["profilePictureUrl"] as? String
+            
+            // Truncate mention text
+            let maxLength = 100
+            let truncatedText = mentionText.count > maxLength ? 
+                String(mentionText.prefix(maxLength)) + "..." : mentionText
+            
+        let notification = AppNotification(
+                type: .userMentioned,
+                fromUserId: currentUserId,
+                fromUserName: displayName,
+                fromUserUsername: username,
+                fromUserProfilePictureUrl: profilePictureUrl,
+                contextId: contentId, // commentId or logId
+                contextTitle: log.title,
+                contextSubtitle: log.artistName,
+                contextImageUrl: log.artworkUrl,
+                message: truncatedText
+            )
+            
+            try await saveNotification(notification, toUserId: mentionedUserId)
+            print("✅ Mention notification created")
+        } catch {
+            print("❌ Error creating mention notification: \(error)")
+        }
+    }
+    
+    // MARK: - Helper Functions
+    
+    private func createGroupedDisplayText(userIds: [String], action: String) async -> String {
+        do {
+            var usernames: [String] = []
+            for userId in userIds.prefix(3) { // Only get first 3
+                let userDoc = try await db.collection("users").document(userId).getDocument()
+                if let username = userDoc.data()?["username"] as? String {
+                    usernames.append(username)
                 }
             }
-        
-        listeners.append(listener)
-    }
-    
-    /// Stop listening to notifications
-    func stopListening() {
-        for listener in listeners {
-            listener.remove()
-        }
-        listeners.removeAll()
-    }
-    
-    /// Mark a notification as read
-    func markAsRead(_ notification: AppNotification) {
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
-        
-        db.collection("users").document(currentUserId).collection("notifications")
-            .document(notification.notificationId)
-            .updateData(["isRead": true]) { error in
-                if let error = error {
-                    print("❌ Error marking notification as read: \(error.localizedDescription)")
+            
+            if userIds.count == 1 {
+                return usernames.first ?? "Someone"
+            } else if userIds.count == 2 {
+                return "\(usernames[0]) and \(usernames[1])"
+            } else if userIds.count == 3 {
+                return "\(usernames[0]), \(usernames[1]), and \(usernames[2])"
+            } else {
+                let othersCount = userIds.count - 2
+                return "\(usernames[0]), \(usernames[1]), and \(othersCount) \(othersCount == 1 ? "other" : "others")"
                 }
-            }
-    }
-    
-    /// Mark all notifications as read
-    func markAllAsRead() {
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
-        
-        let batch = db.batch()
-        
-        for notification in recentNotifications where !notification.isRead {
-            let ref = db.collection("users").document(currentUserId).collection("notifications")
-                .document(notification.notificationId)
-            batch.updateData(["isRead": true], forDocument: ref)
-        }
-        
-        batch.commit { error in
-            if let error = error {
-                print("❌ Error marking all notifications as read: \(error.localizedDescription)")
-            }
+        } catch {
+            return "Multiple users"
         }
     }
     
-    /// Delete a notification
-    func deleteNotification(_ notification: AppNotification) {
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+    private func saveNotification(_ notification: AppNotification, toUserId: String, groupedUserIds: [String]? = nil) async throws {
+        print("💾 [NotificationService] Saving notification...")
+        print("   Type: \(notification.type.rawValue)")
+        print("   To User: \(toUserId)")
+        print("   From User: \(notification.fromUserId ?? "nil")")
         
-        db.collection("users").document(currentUserId).collection("notifications")
-            .document(notification.notificationId)
-            .delete { error in
-                if let error = error {
-                    print("❌ Error deleting notification: \(error.localizedDescription)")
-                }
-            }
-    }
-    
-    /// Clear all notifications
-    func clearAllNotifications() {
-        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        var data: [String: Any] = [
+            "type": notification.type.rawValue,
+            "timestamp": FieldValue.serverTimestamp(),
+            "isRead": false,
+            "fromUserId": notification.fromUserId ?? "",
+            "fromUserName": notification.fromUserName ?? "",
+            "fromUserUsername": notification.fromUserUsername ?? "",
+        ]
         
-        let batch = db.batch()
-        
-        for notification in recentNotifications {
-            let ref = db.collection("users").document(currentUserId).collection("notifications")
-                .document(notification.notificationId)
-            batch.deleteDocument(ref)
+        if let profilePictureUrl = notification.fromUserProfilePictureUrl {
+            data["fromUserProfilePictureUrl"] = profilePictureUrl
         }
         
-        batch.commit { error in
-            if let error = error {
-                print("❌ Error clearing all notifications: \(error.localizedDescription)")
+        if let contextId = notification.contextId {
+            data["contextId"] = contextId
+        }
+        
+        if let contextTitle = notification.contextTitle {
+            data["contextTitle"] = contextTitle
+        }
+        
+        if let contextSubtitle = notification.contextSubtitle {
+            data["contextSubtitle"] = contextSubtitle
+        }
+        
+        if let contextImageUrl = notification.contextImageUrl {
+            data["contextImageUrl"] = contextImageUrl
+        }
+        
+        if let message = notification.message {
+            data["message"] = message
+        }
+        
+        if let groupedUserIds = groupedUserIds {
+            data["groupedUserIds"] = groupedUserIds
+        }
+        
+        let path = "users/\(toUserId)/notifications"
+        print("   Writing to path: \(path)")
+        
+        do {
+            try await db.collection("users")
+                .document(toUserId)
+                .collection("notifications")
+                .addDocument(data: data)
+            print("✅ [NotificationService] Successfully saved notification!")
+        } catch {
+            print("❌ [NotificationService] FAILED to save notification!")
+            print("   Error: \(error)")
+            print("   Error description: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
+    // MARK: - Mark as Read/Delete
+    
+    func markAsRead(notificationId: String) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        do {
+            try await db.collection("users")
+                .document(currentUserId)
+                .collection("notifications")
+                .document(notificationId)
+                .updateData(["isRead": true])
+        } catch {
+            print("❌ Error marking notification as read: \(error)")
+        }
+    }
+    
+    func markAllAsRead() async {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        do {
+            let snapshot = try await db.collection("users")
+                .document(currentUserId)
+                .collection("notifications")
+                .whereField("isRead", isEqualTo: false)
+                .getDocuments()
+            
+            for doc in snapshot.documents {
+                try await doc.reference.updateData(["isRead": true])
             }
+            
+            unreadCount = 0
+            print("✅ All notifications marked as read")
+        } catch {
+            print("❌ Error marking all notifications as read: \(error)")
+        }
+    }
+    
+    func deleteNotification(notificationId: String) async {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        do {
+            try await db.collection("users")
+                .document(currentUserId)
+                .collection("notifications")
+                .document(notificationId)
+                .delete()
+            
+            print("✅ Notification deleted")
+        } catch {
+            print("❌ Error deleting notification: \(error)")
+        }
+    }
+    
+    func deleteAllNotifications() async {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return }
+        
+        do {
+            let snapshot = try await db.collection("users")
+                .document(currentUserId)
+                .collection("notifications")
+                .getDocuments()
+            
+            for doc in snapshot.documents {
+                try await doc.reference.delete()
+            }
+            
+            print("✅ All notifications deleted")
+        } catch {
+            print("❌ Error deleting all notifications: \(error)")
+        }
+    }
+    
+    // MARK: - Fetch & Group Notifications
+    
+    /// Fetch all notifications for the current user
+    func fetchNotifications() async -> [AppNotification] {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return [] }
+        
+        do {
+            let snapshot = try await db.collection("users")
+                .document(currentUserId)
+                .collection("notifications")
+                .order(by: "timestamp", descending: true)
+                .limit(to: 100)
+                .getDocuments()
+            
+            let notifications = snapshot.documents.compactMap { doc -> AppNotification? in
+                try? doc.data(as: AppNotification.self)
+            }
+            
+            return notifications
+        } catch {
+            print("❌ Error fetching notifications: \(error)")
+            return []
+        }
+    }
+    
+    /// Group notifications by type and context (e.g., all likes on the same log)
+    func groupNotifications(_ notifications: [AppNotification]) -> [GroupedNotification] {
+        var grouped: [String: [AppNotification]] = [:]
+        
+        // Group notifications that can be grouped (likes, reposts, dislikes)
+        let groupableTypes: [NotificationType] = [.musicLogLiked, .musicLogReposted, .musicLogDisliked]
+        
+        for notification in notifications {
+            if groupableTypes.contains(notification.type), let contextId = notification.contextId {
+                let groupKey = "\(notification.type.rawValue)_\(contextId)"
+                grouped[groupKey, default: []].append(notification)
+            }
+        }
+        
+        // Create grouped notifications from groups with more than 1 notification
+        return grouped.compactMap { key, notifs -> GroupedNotification? in
+            guard notifs.count > 1,
+                  let firstNotif = notifs.first else { return nil }
+            
+            return GroupedNotification(
+                type: firstNotif.type,
+                contextId: firstNotif.contextId ?? "",
+                contextTitle: firstNotif.contextTitle,
+                contextSubtitle: firstNotif.contextSubtitle,
+                contextImageUrl: firstNotif.contextImageUrl,
+                notifications: notifs
+            )
+        }.sorted { $0.latestTimestamp > $1.latestTimestamp }
+    }
+    
+    /// Get ungrouped notifications (single notifications + comments/follows/mentions)
+    func getUngroupedNotifications(_ notifications: [AppNotification]) -> [AppNotification] {
+        let groupableTypes: [NotificationType] = [.musicLogLiked, .musicLogReposted, .musicLogDisliked]
+        
+        // Group by type and contextId
+        var grouped: [String: [AppNotification]] = [:]
+        for notification in notifications {
+            if groupableTypes.contains(notification.type), let contextId = notification.contextId {
+                let groupKey = "\(notification.type.rawValue)_\(contextId)"
+                grouped[groupKey, default: []].append(notification)
+            }
+        }
+        
+        // Return only notifications that:
+        // 1. Are not groupable types (comments, follows, mentions)
+        // 2. Are groupable types but only have 1 notification in their group
+        return notifications.filter { notification in
+            if groupableTypes.contains(notification.type), let contextId = notification.contextId {
+                let groupKey = "\(notification.type.rawValue)_\(contextId)"
+                return grouped[groupKey]?.count == 1
+            }
+            return true // Not a groupable type, so include it
         }
     }
 }
-
-// MARK: - Convenience Extensions
-
-extension NotificationService {
-    
-    /// Quick method to notify all friends about a new party
-    func notifyFriendsAboutNewParty(hostId: String, hostName: String, hostUsername: String, hostProfilePictureUrl: String?, partyId: String, partyName: String, friendIds: [String]) {
-        createFriendStartedPartyNotification(
-            fromUserId: hostId,
-            fromUserName: hostName,
-            fromUserUsername: hostUsername,
-            fromUserProfilePictureUrl: hostProfilePictureUrl,
-            toUserIds: friendIds,
-            partyId: partyId,
-            partyName: partyName
-        )
-    }
-    
-    /// Quick method to notify followers about a new DJ stream
-    func notifyFollowersAboutDJStream(djId: String, djName: String, djUsername: String, djProfilePictureUrl: String?, streamId: String, streamTitle: String, followerIds: [String]) {
-        createDJStreamStartedNotification(
-            fromUserId: djId,
-            fromUserName: djName,
-            fromUserUsername: djUsername,
-            fromUserProfilePictureUrl: djProfilePictureUrl,
-            toUserIds: followerIds,
-            streamId: streamId,
-            streamTitle: streamTitle
-        )
-    }
-    
-    /// Quick method to send daily prompt notifications to all active users
-    func notifyAllUsersAboutDailyPrompt(promptId: String, promptTitle: String) {
-        // This would typically fetch all active user IDs from the database
-        // For now, we'll leave this as a placeholder
-        let allActiveUserIds: [String] = [] // TODO: Implement fetching active users
-        
-        createNewDailyPromptNotification(
-            promptId: promptId,
-            promptTitle: promptTitle,
-            toUserIds: allActiveUserIds
-        )
-    }
-}
-

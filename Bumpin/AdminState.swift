@@ -5,6 +5,7 @@ import FirebaseFirestore
 @MainActor
 final class AdminState: ObservableObject {
     @Published private(set) var isAdmin: Bool = false
+    @Published var showReports: Bool = false
 
     private var listener: ListenerRegistration?
 
@@ -18,7 +19,11 @@ final class AdminState: ObservableObject {
             .addSnapshotListener { [weak self] snap, _ in
                 Task { @MainActor in
                     guard let data = snap?.data() else { self?.isAdmin = false; return }
-                    self?.isAdmin = (data["isAdmin"] as? Bool) == true
+                    let isAdmin = (data["isAdmin"] as? Bool) == true
+                    self?.isAdmin = isAdmin
+                    if isAdmin {
+                        UsernameDirectoryService.shared.backfillDirectoryIfNeeded()
+                    }
                 }
             }
     }

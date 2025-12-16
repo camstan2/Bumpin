@@ -43,12 +43,42 @@ struct AppNotification: Identifiable, Codable {
     }
 }
 
+// MARK: - Grouped Notification Models
+
+struct GroupedNotification: Identifiable {
+    let id: String // Uses the contextId (logId) as the group ID
+    let type: NotificationType
+    let contextId: String // The log/item being interacted with
+    let contextTitle: String?
+    let contextSubtitle: String?
+    let contextImageUrl: String?
+    let notifications: [AppNotification] // All individual notifications in this group
+    var count: Int { notifications.count }
+    var latestTimestamp: Date { notifications.map(\.timestamp).max() ?? Date() }
+    var hasUnread: Bool { notifications.contains(where: { !$0.isRead }) }
+    
+    // User info for display
+    var primaryUser: AppNotification? { notifications.first }
+    var additionalUserCount: Int { max(0, count - 1) }
+    
+    init(type: NotificationType, contextId: String, contextTitle: String?, contextSubtitle: String?, contextImageUrl: String?, notifications: [AppNotification]) {
+        self.id = "\(type.rawValue)_\(contextId)"
+        self.type = type
+        self.contextId = contextId
+        self.contextTitle = contextTitle
+        self.contextSubtitle = contextSubtitle
+        self.contextImageUrl = contextImageUrl
+        self.notifications = notifications.sorted { $0.timestamp > $1.timestamp }
+    }
+}
+
 enum NotificationType: String, Codable, CaseIterable {
     // Social
     case newFollower = "new_follower"
     case musicLogLiked = "music_log_liked"
     case musicLogCommented = "music_log_commented"
     case musicLogReposted = "music_log_reposted"
+    case musicLogDisliked = "music_log_disliked"
     case commentReplied = "comment_replied"
     case userMentioned = "user_mentioned"
     case friendJoinedApp = "friend_joined_app"
@@ -94,6 +124,7 @@ enum NotificationType: String, Codable, CaseIterable {
         case .musicLogLiked: return "heart.fill"
         case .musicLogCommented: return "bubble.left"
         case .musicLogReposted: return "arrowshape.turn.up.right"
+        case .musicLogDisliked: return "hand.thumbsdown.fill"
         case .commentReplied: return "arrowshape.turn.up.left"
         case .userMentioned: return "at"
         case .friendJoinedApp: return "person.2.badge.plus"
@@ -129,7 +160,8 @@ enum NotificationType: String, Codable, CaseIterable {
         case .musicLogLiked, .promptResponseLiked: return .red
         case .musicLogCommented, .commentReplied, .promptResponseCommented: return .green
         case .musicLogReposted: return .cyan
-        case .userMentioned: return .orange
+        case .musicLogDisliked: return .orange
+        case .userMentioned: return .purple
         case .friendJoinedApp: return .mint
         case .partyInvite, .partyJoined, .friendStartedParty, .partyEnded, .partyHostChanged, .partySongAdded: return .purple
         case .newDailyPrompt, .promptLeaderboard, .friendCompletedPrompt: return .yellow

@@ -28,9 +28,6 @@ struct MatchmakingSettingsView: View {
                         
                         // Statistics section
                         statisticsSection
-                        
-                        // Demo section
-                        demoSection
                     }
                 }
                 .padding(.bottom, 40)
@@ -288,55 +285,6 @@ struct MatchmakingSettingsView: View {
                     icon: "checkmark.circle.fill",
                     color: .blue
                 )
-            }
-            .padding(.horizontal, 20)
-        }
-    }
-    
-    // MARK: - Demo Section
-    
-    private var demoSection: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Text("Live Demo")
-                    .font(.headline)
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-            
-            VStack(spacing: 12) {
-                DemoToggleCard(
-                    title: "Show Bot in Messages",
-                    description: "Add a mock bot conversation to your Messages tab to see exactly how it will look",
-                    icon: "message.badge.fill",
-                    color: .blue,
-                    isOn: viewModel.showMockBot,
-                    action: { 
-                        viewModel.toggleMockBot()
-                    }
-                )
-                
-                Button(action: { showingInfoSheet = true }) {
-                    HStack {
-                        Image(systemName: "play.circle.fill")
-                            .foregroundColor(.purple)
-                        
-                        Text("View Interactive Demo")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                        
-                        Spacer()
-                        
-                        Image(systemName: "chevron.right")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color.purple.opacity(0.1))
-                    .cornerRadius(12)
-                }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 20)
         }

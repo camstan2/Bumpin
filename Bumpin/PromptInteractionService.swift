@@ -145,24 +145,23 @@ class PromptInteractionService: ObservableObject {
         
         do {
             if isCurrentlyLiked {
-                // Unlike
-                try await PromptResponseLike.deleteLike(responseId: responseId, userId: user.uid)
-                userLikedResponses.remove(responseId)
+                let didDelete = try await PromptResponseLike.deleteLike(responseId: responseId, userId: user.uid)
                 
-                // Update local count
-                if var likes = responseLikes[responseId] {
-                    likes.removeAll { $0.userId == user.uid }
-                    responseLikes[responseId] = likes
+                if didDelete {
+                    userLikedResponses.remove(responseId)
+                    
+                    if var likes = responseLikes[responseId] {
+                        likes.removeAll { $0.userId == user.uid }
+                        responseLikes[responseId] = likes
+                    }
+                    
+                    AnalyticsService.shared.logEvent("prompt_response_unliked", parameters: [
+                        "response_id": responseId,
+                        "prompt_id": promptId
+                    ])
                 }
                 
-                // Track analytics
-                AnalyticsService.shared.logEvent("prompt_response_unliked", parameters: [
-                    "response_id": responseId,
-                    "prompt_id": promptId
-                ])
-                
             } else {
-                // Like
                 let userProfile = try await fetchUserProfile(userId: user.uid)
                 
                 let like = PromptResponseLike(
@@ -172,27 +171,27 @@ class PromptInteractionService: ObservableObject {
                     username: userProfile?.username ?? "Anonymous"
                 )
                 
-                try await PromptResponseLike.createLike(like)
-                userLikedResponses.insert(responseId)
+                let didCreate = try await PromptResponseLike.createLike(like)
                 
-                // Update local state
-                if responseLikes[responseId] == nil {
-                    responseLikes[responseId] = []
+                if didCreate {
+                    userLikedResponses.insert(responseId)
+                    
+                    if responseLikes[responseId] == nil {
+                        responseLikes[responseId] = []
+                    }
+                    responseLikes[responseId]?.insert(like, at: 0)
+                    
+                    NotificationCenter.default.post(
+                        name: .promptResponseLiked,
+                        object: nil,
+                        userInfo: ["like": like]
+                    )
+                    
+                    AnalyticsService.shared.logEvent("prompt_response_liked", parameters: [
+                        "response_id": responseId,
+                        "prompt_id": promptId
+                    ])
                 }
-                responseLikes[responseId]?.insert(like, at: 0)
-                
-                // Post notification
-                NotificationCenter.default.post(
-                    name: .promptResponseLiked,
-                    object: nil,
-                    userInfo: ["like": like]
-                )
-                
-                // Track analytics
-                AnalyticsService.shared.logEvent("prompt_response_liked", parameters: [
-                    "response_id": responseId,
-                    "prompt_id": promptId
-                ])
             }
             
             return true

@@ -3,52 +3,44 @@ import FirebaseAuth
 import FirebaseFirestore
 
 final class FollowersFeedViewModel: ObservableObject {
-    enum Section: String, CaseIterable { case friends = "Friends", following = "Following", trending = "Trending" }
+    enum Section: String, CaseIterable { case following = "Following", trending = "Trending" }
     enum Ordering: String { case blended, mostRecent }
 
-    @Published var selectedSection: Section = .friends
+    @Published var selectedSection: Section = .following
     @Published var ordering: Ordering = (UserDefaults.standard.string(forKey: "followersOrdering").flatMap { Ordering(rawValue: $0) }) ?? .blended
     @Published var isLoadingInitial = false
     @Published var isLoadingMore = false
     @Published var errorMessage: String?
 
-    @Published var friendsLogs: [MusicLog] = []
     @Published var followingLogs: [MusicLog] = []
     @Published var trendingLogs: [MusicLog] = []
     @Published var repostersByLogId: [String: [String]] = [:]
 
     private let db = Firestore.firestore()
     private let calendar = Calendar.current
-    private var friendsOldestDate: Date? = nil
     private var followingOldestDate: Date? = nil
     private var trendingOldestDate: Date? = nil
+    private var followingHasMore: Bool = true
+    private var trendingHasMore: Bool = true
     // Track affinity sets for scoring
-    private var mutualIds: Set<String> = []
-    private var followingOnlyIds: Set<String> = []
+    private var followingIds: Set<String> = []
 
     func load() async {
         #if DEBUG
         if UserDefaults.standard.bool(forKey: "feed.mockData") {
             await MainActor.run { self.isLoadingInitial = true; self.errorMessage = nil }
-            // Generate mock data for Friends, Following, and Trending
-            let friends = Self.generateMockLogs(count: 12, userPrefix: "friend", hoursBack: 36)
-            let followingOnly = Self.generateMockLogs(count: 16, userPrefix: "follow", hoursBack: 48)
-            let combined = friends + followingOnly
-            let trending = scoreAndSortLogs(combined)
+            // Generate mock data for Following and Trending
+            let following = Self.generateMockLogs(count: 20, userPrefix: "follow", hoursBack: 48)
+            let trending = scoreAndSortLogs(following)
             await MainActor.run {
-                self.friendsLogs = self.applyOrdering(friends)
-                self.followingLogs = self.applyOrdering(followingOnly)
+                self.followingLogs = self.applyOrdering(following)
                 self.trendingLogs = trending
                 // Mock some repost attributions
                 var attrib: [String: [String]] = [:]
                 for (idx, log) in self.followingLogs.enumerated() where idx % 4 == 0 {
                     attrib[log.id] = ["alex", "sam"].prefix(Int.random(in: 1...2)).map { $0 }
                 }
-                for (idx, log) in self.friendsLogs.enumerated() where idx % 5 == 0 {
-                    attrib[log.id, default: []].append("jordan")
-                }
                 self.repostersByLogId = attrib
-                self.friendsOldestDate = self.friendsLogs.last?.dateLogged
                 self.followingOldestDate = self.followingLogs.last?.dateLogged
                 self.trendingOldestDate = self.trendingLogs.last?.dateLogged
                 self.isLoadingInitial = false
@@ -56,52 +48,55 @@ final class FollowersFeedViewModel: ObservableObject {
             return
         }
         #endif
+        guard !isLoadingInitial else { return }
         guard let uid = Auth.auth().currentUser?.uid else { return }
         await MainActor.run { self.isLoadingInitial = true; self.errorMessage = nil }
         do {
-            let userDoc = try await db.collection("users").document(uid).getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Set(followingIds).intersection(Set(followerIds))
-            let followingOnly = Set(followingIds).subtracting(mutuals)
-            self.mutualIds = mutuals
-            self.followingOnlyIds = followingOnly
+            // Fetch following IDs from subcollection instead of array field
+            print("🔍 [FollowersFeed] Fetching following for uid: \(uid)")
+            let followingSnapshot = try await db.collection("users").document(uid).collection("following").getDocuments()
+            let followingIdsList = followingSnapshot.documents.map { $0.documentID }
+            print("✅ [FollowersFeed] Found \(followingIdsList.count) following: \(followingIdsList)")
+            let followingSet = Set(followingIdsList)
+            self.followingIds = followingSet
+            self.followingHasMore = true
+            self.trendingHasMore = true
 
             // Hidden users
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
+            let filteredFollowing = Array(followingSet.filter { !hidden.contains($0) })
 
-            async let friendsFetch: [MusicLog] = fetchLogs(for: Array(mutuals.filter { !hidden.contains($0) }))
-            async let followingFetch: [MusicLog] = fetchLogs(for: Array(followingOnly.filter { !hidden.contains($0) }))
-            let (friends, followingLogs) = try await (friendsFetch, followingFetch)
+            print("🔍 [FollowersFeed] Fetching logs for following users...")
+            async let followingLogsTask = fetchLogs(for: filteredFollowing)
+            async let trendingLogsTask = fetchGlobalTrendingLogs(hidden: hidden)
+            async let repostsTask = loadReposts(following: followingSet, hidden: hidden)
 
-            let trending = scoreAndSortLogs(friends + followingLogs)
+            let followingLogs = try await followingLogsTask
+            print("✅ [FollowersFeed] Found \(followingLogs.count) logs from following")
+            let globalTrendingSource = try await trendingLogsTask
+            let repostResult = try await repostsTask
 
-            // Include reposted logs from people you follow/friends
-            let hiddenSet = hidden
-            let mutualsSet = Set(mutuals)
-            let followingOnlySet = Set(followingOnly)
-            let repostResult = try await loadReposts(mutuals: mutualsSet, followingOnly: followingOnlySet, hidden: hiddenSet)
+            let trendingMinDate = globalTrendingSource.map { $0.dateLogged }.min()
+            let trending = scoreAndSortLogs(globalTrendingSource, applyAffinity: false)
+            followingHasMore = !filteredFollowing.isEmpty
+            trendingHasMore = globalTrendingSource.count >= 400
+
             await MainActor.run {
-                self.friendsLogs = self.applyOrdering(friends)
-                self.followingLogs = self.applyOrdering(followingLogs)
-                // Merge reposted logs
-                if !repostResult.friends.isEmpty {
-                    self.friendsLogs = self.applyOrdering(self.mergeUnique(existing: self.friendsLogs, new: repostResult.friends))
+                var orderedFollowing = self.applyOrdering(followingLogs)
+                if !repostResult.logs.isEmpty {
+                    orderedFollowing = self.applyOrdering(self.mergeUnique(existing: orderedFollowing, new: repostResult.logs))
                 }
-                if !repostResult.following.isEmpty {
-                    self.followingLogs = self.applyOrdering(self.mergeUnique(existing: self.followingLogs, new: repostResult.following))
-                }
+                self.followingLogs = orderedFollowing
                 self.trendingLogs = trending
-                // Attribution map
                 self.repostersByLogId = repostResult.attribution
-                self.friendsOldestDate = self.friendsLogs.last?.dateLogged
-                self.followingOldestDate = self.followingLogs.last?.dateLogged
-                self.trendingOldestDate = self.trendingLogs.last?.dateLogged
+                self.followingOldestDate = orderedFollowing.map { $0.dateLogged }.min()
+                self.trendingOldestDate = trendingMinDate
                 self.isLoadingInitial = false
+                print("✅ [FollowersFeed] Load complete - Following: \(self.followingLogs.count), Trending: \(self.trendingLogs.count)")
             }
         } catch {
+            print("❌ [FollowersFeed] Load failed: \(error.localizedDescription)")
             await MainActor.run { self.errorMessage = error.localizedDescription; self.isLoadingInitial = false }
         }
     }
@@ -124,39 +119,49 @@ final class FollowersFeedViewModel: ObservableObject {
         for l in all { map[l.id] = l }
         return Array(map.values)
     }
-
-    private func scoreAndSortLogs(_ logs: [MusicLog]) -> [MusicLog] {
-        let cfg = ScoringConfig.shared
-        func score(_ log: MusicLog) -> Double {
-            // Engagement component
-            let helpful = Double(log.helpfulCount ?? 0)
-            let comments = Double(log.commentCount ?? 0)
-            let rating = Double(log.rating ?? 0)
-            let unhelpful = Double(log.unhelpfulCount ?? 0)
-            let reposts = Double((repostersByLogId[log.id]?.count ?? 0))
-            let engagement = max(0.0,
-                helpful * cfg.helpfulWeight +
-                comments * cfg.commentsWeight +
-                rating * cfg.ratingWeight -
-                unhelpful * cfg.unhelpfulPenalty +
-                reposts * cfg.repostWeight
-            )
-
-            // Recency (exponential decay, multiplicative)
-            let ageHours = Date().timeIntervalSince(log.dateLogged) / 3600.0
-            let recencyFactor = pow(exp(-ageHours / cfg.decayHours), cfg.recencyWeightMultiplier)
-
-            // Affinity boost (mutuals > following-only)
-            let affinityBoost: Double = {
-                if mutualIds.contains(log.userId) { return 1.0 + cfg.mutualBoost }
-                if followingOnlyIds.contains(log.userId) { return 1.0 + cfg.followingBoost }
-                return 1.0
-            }()
-
-            // Final blended score (multiplicative mix)
-            return engagement * recencyFactor * affinityBoost
+    
+    private func fetchGlobalTrendingLogs(before: Date? = nil, hidden: Set<String>) async throws -> [MusicLog] {
+        let now = Date()
+        let seventyTwoHoursAgo = calendar.date(byAdding: .day, value: -3, to: now) ?? now
+        var query: Query = db.collection("logs")
+            .whereField("dateLogged", isGreaterThan: seventyTwoHoursAgo)
+            .order(by: "dateLogged", descending: true)
+        if let cutoff = before {
+            query = query.whereField("dateLogged", isLessThan: cutoff)
         }
-        return logs.sorted { score($0) > score($1) }
+        let snapshot = try await query.limit(to: 400).getDocuments()
+        var logs = snapshot.documents.compactMap { try? $0.data(as: MusicLog.self) }
+        logs = logs.filter { ($0.isPublic ?? true) && !hidden.contains($0.userId) }
+        return logs
+    }
+
+    private func scoreAndSortLogs(_ logs: [MusicLog], applyAffinity: Bool = true) -> [MusicLog] {
+        // Use new engagement scoring service
+        let baseSorted = EngagementScoringService.shared.sortByEngagement(logs)
+        
+        // Apply affinity boost for following relationships
+        let cfg = ScoringConfig.shared
+        return baseSorted.sorted { log1, log2 in
+            let score1 = EngagementScoringService.shared.calculateScore(for: log1)
+            let score2 = EngagementScoringService.shared.calculateScore(for: log2)
+            
+            // Recency factor (exponential decay, multiplicative)
+            let ageHours1 = Date().timeIntervalSince(log1.dateLogged) / 3600.0
+            let recencyFactor1 = pow(exp(-ageHours1 / cfg.decayHours), cfg.recencyWeightMultiplier)
+            
+            let ageHours2 = Date().timeIntervalSince(log2.dateLogged) / 3600.0
+            let recencyFactor2 = pow(exp(-ageHours2 / cfg.decayHours), cfg.recencyWeightMultiplier)
+            
+            // Affinity boost for following users
+            let affinityBoost1: Double = (applyAffinity && followingIds.contains(log1.userId)) ? 1.0 + cfg.followingBoost : 1.0
+            let affinityBoost2: Double = (applyAffinity && followingIds.contains(log2.userId)) ? 1.0 + cfg.followingBoost : 1.0
+            
+            // Final blended score (multiplicative mix)
+            let final1 = score1 * recencyFactor1 * affinityBoost1
+            let final2 = score2 * recencyFactor2 * affinityBoost2
+            
+            return final1 > final2
+        }
     }
 
     private func applyOrdering(_ logs: [MusicLog]) -> [MusicLog] {
@@ -164,15 +169,14 @@ final class FollowersFeedViewModel: ObservableObject {
         case .mostRecent:
             return logs.sorted { $0.dateLogged > $1.dateLogged }
         case .blended:
-            return scoreAndSortLogs(logs)
+            return scoreAndSortLogs(logs, applyAffinity: true)
         }
     }
-
+    
     // Public helper to reapply current ordering to in-memory arrays
     func reapplyOrderingInPlace() {
-        friendsLogs = applyOrdering(friendsLogs)
         followingLogs = applyOrdering(followingLogs)
-        trendingLogs = applyOrdering(trendingLogs)
+        trendingLogs = scoreAndSortLogs(trendingLogs, applyAffinity: false)
     }
 
     @MainActor
@@ -184,29 +188,32 @@ final class FollowersFeedViewModel: ObservableObject {
             // Hidden users
             await UserPreferencesService.shared.loadHiddenUsers()
             let hidden = UserPreferencesService.shared.hiddenUserIds
-            let userDoc = try await db.collection("users").document(Auth.auth().currentUser?.uid ?? "").getDocument()
-            let data = userDoc.data() ?? [:]
-            let followingIds = (data["following"] as? [String]) ?? []
-            let followerIds = (data["followers"] as? [String]) ?? []
-            let mutuals = Set(followingIds).intersection(Set(followerIds))
-            let followingOnly = Set(followingIds).subtracting(mutuals)
+            let uid = Auth.auth().currentUser?.uid ?? ""
+            let followingSnapshot = try await db.collection("users").document(uid).collection("following").getDocuments()
+            let following = Set(followingSnapshot.documents.map { $0.documentID })
 
             switch selectedSection {
-            case .friends:
-                let more = try await fetchLogs(for: Array(mutuals.filter { !hidden.contains($0) }), before: friendsOldestDate)
-                let merged = mergeUnique(existing: friendsLogs, new: more)
-                friendsLogs = applyOrdering(merged)
-                friendsOldestDate = friendsLogs.last?.dateLogged ?? friendsOldestDate
             case .following:
-                let more = try await fetchLogs(for: Array(followingOnly.filter { !hidden.contains($0) }), before: followingOldestDate)
+                guard followingHasMore else { return }
+                let more = try await fetchLogs(for: Array(following.filter { !hidden.contains($0) }), before: followingOldestDate)
+                if more.isEmpty {
+                    followingHasMore = false
+                    return
+                }
                 let merged = mergeUnique(existing: followingLogs, new: more)
-                followingLogs = applyOrdering(merged)
-                followingOldestDate = followingLogs.last?.dateLogged ?? followingOldestDate
+                let ordered = applyOrdering(merged)
+                followingLogs = ordered
+                followingOldestDate = ordered.map { $0.dateLogged }.min() ?? followingOldestDate
             case .trending:
-                let all = try await fetchLogs(for: Array(mutuals.union(followingOnly).filter { !hidden.contains($0) }), before: trendingOldestDate)
-                let merged = mergeUnique(existing: trendingLogs, new: all)
-                trendingLogs = scoreAndSortLogs(merged)
-                trendingOldestDate = trendingLogs.last?.dateLogged ?? trendingOldestDate
+                guard trendingHasMore else { return }
+                let more = try await fetchGlobalTrendingLogs(before: trendingOldestDate, hidden: hidden)
+                if more.isEmpty {
+                    trendingHasMore = false
+                    return
+                }
+                let merged = mergeUnique(existing: trendingLogs, new: more)
+                trendingLogs = scoreAndSortLogs(merged, applyAffinity: false)
+                trendingOldestDate = merged.map { $0.dateLogged }.min() ?? trendingOldestDate
             }
         } catch {
             // ignore
@@ -219,12 +226,11 @@ final class FollowersFeedViewModel: ObservableObject {
         return Array(map.values)
     }
 
-    // Load reposted logs from people you follow/friends using collectionGroup("reposts")
-    private func loadReposts(mutuals: Set<String>, followingOnly: Set<String>, hidden: Set<String>) async throws -> (friends: [MusicLog], following: [MusicLog], attribution: [String: [String]]) {
+    // Load reposted logs from people you follow using collectionGroup("reposts")
+    private func loadReposts(following: Set<String>, hidden: Set<String>) async throws -> (logs: [MusicLog], attribution: [String: [String]]) {
         let db = Firestore.firestore()
         var attribution: [String: [String]] = [:]
-        var friendLogIds: Set<String> = []
-        var followingLogIds: Set<String> = []
+        var logIds: Set<String> = []
 
         func processBatch(_ batch: [String]) async throws {
             let snap = try await db.collectionGroup("reposts")
@@ -234,14 +240,13 @@ final class FollowersFeedViewModel: ObservableObject {
             for doc in snap.documents {
                 if let repost = try? doc.data(as: Repost.self), let logId = repost.logId {
                     if hidden.contains(repost.userId) { continue }
-                    if mutuals.contains(repost.userId) { friendLogIds.insert(logId) }
-                    if followingOnly.contains(repost.userId) { followingLogIds.insert(logId) }
+                    if following.contains(repost.userId) { logIds.insert(logId) }
                     attribution[logId, default: []].append(repost.userId)
                 }
             }
         }
 
-        let unionIds = Array(mutuals.union(followingOnly))
+        let unionIds = Array(following)
         for batch in unionIds.chunked(into: 10) {
             try await processBatch(batch)
         }
@@ -258,9 +263,8 @@ final class FollowersFeedViewModel: ObservableObject {
             return result
         }
 
-        let friendsLogs = try await fetchLogs(by: friendLogIds)
-        let followingLogs = try await fetchLogs(by: followingLogIds)
-        return (friends: friendsLogs, following: followingLogs, attribution: attribution)
+        let logs = try await fetchLogs(by: logIds)
+        return (logs: logs, attribution: attribution)
     }
 }
 
@@ -282,7 +286,7 @@ private extension FollowersFeedViewModel {
         var logs: [MusicLog] = []
         for i in 0..<count {
             let pick = sampleTitles[i % sampleTitles.count]
-            let rating = [3,4,5,4,5,3,4,5,5,4][i % 10]
+            let rating = [3.0,4.0,5.0,4.0,5.0,3.0,4.0,5.0,5.0,4.0][i % 10]
             let hoursOffset = Int.random(in: 1...max(2, hoursBack))
             let log = MusicLog(
                 id: "mock_\(userPrefix)_log_\(i)",
@@ -315,19 +319,46 @@ private extension FollowersFeedViewModel {
 struct FollowersTabView: View {
     @StateObject private var vm = FollowersFeedViewModel()
     @State private var showingDetail: MusicLog?
+    @State private var loggedImpressions: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            // Professional subsection selector (always blended mode)
-            VStack(spacing: 12) {
-                Picker("Feed Section", selection: $vm.selectedSection) {
-                    ForEach(FollowersFeedViewModel.Section.allCases, id: \.rawValue) { section in
-                        Text(section.rawValue).tag(section)
+            // DESIGN ENHANCEMENT: Custom tab bar matching main filter tabs
+            HStack(spacing: 6) {
+                ForEach(FollowersFeedViewModel.Section.allCases, id: \.rawValue) { section in
+                    Button(action: {
+                        vm.selectedSection = section
+                    }) {
+                        Text(section.rawValue)
+                            .font(.caption)
+                            .fontWeight(vm.selectedSection == section ? .bold : .regular)
+                            .foregroundColor(vm.selectedSection == section ? .purple : .primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(vm.selectedSection == section ? Color.purple.opacity(0.12) : Color(.systemGray6))
+                            )
+                            .overlay(
+                                // Bottom indicator line for selected state
+                                VStack {
+                                    Spacer()
+                                    if vm.selectedSection == section {
+                                        Rectangle()
+                                            .fill(Color.purple)
+                                            .frame(height: 3)
+                                            .cornerRadius(1.5)
+                                            .padding(.horizontal, 8)
+                                    }
+                                }
+                            )
                     }
+                    .buttonStyle(PlainButtonStyle())
                 }
-                .pickerStyle(SegmentedPickerStyle())
-                .padding(.horizontal, 4)
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
             .onAppear {
                 // Set to blended mode and keep it there
                 vm.ordering = .blended
@@ -362,7 +393,8 @@ struct FollowersTabView: View {
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView {
-                            LazyVStack(spacing: 12) {
+                            // DESIGN ENHANCEMENT: Increased spacing for better visual hierarchy
+                            LazyVStack(spacing: 16) {
                                 ForEach(logs, id: \.id) { log in
                                     FollowersLogRow(log: log, reposterNames: reposterNamesFor(log))
                                         .id(log.id)
@@ -371,12 +403,18 @@ struct FollowersTabView: View {
                                             if log.id == logs.suffix(2).first?.id {
                                                 Task { await vm.loadMore() }
                                             }
-                                            AnalyticsService.shared.logImpression(category: "followers_row_\(vm.selectedSection.rawValue.lowercased())", id: log.id)
+                                            let impressionKey = "\(vm.selectedSection.rawValue)#\(log.id)"
+                                            if !loggedImpressions.contains(impressionKey) {
+                                                loggedImpressions.insert(impressionKey)
+                                                AnalyticsService.shared.logImpression(category: "followers_row_\(vm.selectedSection.rawValue.lowercased())", id: log.id)
+                                            }
                                             UserDefaults.standard.set(log.id, forKey: "followersAnchor_\(vm.selectedSection.rawValue)")
                                         }
                                 }
                             }
                         }
+                        .id(vm.selectedSection)
+                        .transaction { $0.disablesAnimations = true }
                         .refreshable { await vm.load() }
                         .onAppear {
                             if let anchor = UserDefaults.standard.string(forKey: "followersAnchor_\(vm.selectedSection.rawValue)") {
@@ -420,7 +458,6 @@ struct FollowersTabView: View {
     
     private func emptyTitle() -> String {
         switch vm.selectedSection {
-        case .friends: return "No recent posts from friends"
         case .following: return "No recent posts from people you follow"
         case .trending: return "No trending posts right now"
         }
@@ -428,15 +465,13 @@ struct FollowersTabView: View {
 
     private func emptySubtitle() -> String {
         switch vm.selectedSection {
-        case .friends: return "Invite friends or follow people you know to see their posts here."
-        case .following: return "Try switching to Most recent or check back later."
+        case .following: return "Follow people to see their posts here."
         case .trending: return "Engagement is quiet—check back soon."
         }
     }
 
     private func currentLogs() -> [MusicLog] {
         switch vm.selectedSection {
-        case .friends: return vm.friendsLogs
         case .following: return vm.followingLogs
         case .trending: return vm.trendingLogs
         }
