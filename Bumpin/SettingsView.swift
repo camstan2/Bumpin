@@ -69,6 +69,7 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $showTuner) { ScoringTunerView() }
         }
+        .navigationViewStyle(.stack)
     }
     
     // MARK: - User Settings Content (NEW STRUCTURE)

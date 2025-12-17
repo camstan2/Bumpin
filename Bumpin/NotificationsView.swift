@@ -25,6 +25,7 @@ struct NotificationsView: View {
     @State private var showMessages = false
     @StateObject private var dmUnreadService = DirectMessageUnreadService.shared
     @State private var showNewChatCreation = false
+    @State private var selectedConversation: Conversation? = nil
     
     // Navigation state
     @State private var selectedUserId: NavigableUserId?
@@ -62,7 +63,20 @@ struct NotificationsView: View {
                 await refreshAllData()
             }
             .sheet(isPresented: $showNewChatCreation) {
-                NewChatCreationView()
+                NavigationView {
+                    DMComposeSearchView { conversation in
+                        showNewChatCreation = false
+                        selectedConversation = conversation
+                    }
+                    .navigationTitle("New Message")
+                }
+                .navigationViewStyle(.stack)
+            }
+            .fullScreenCover(item: $selectedConversation) { conversation in
+                ConversationView(
+                    conversation: conversation,
+                    onDismiss: { selectedConversation = nil }
+                )
             }
             .fullScreenCover(item: $selectedUserId) { userId in
                 UserProfileView(userId: userId.id, showFullProfile: false)

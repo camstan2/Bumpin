@@ -310,32 +310,37 @@ class UserProfileViewModel: ObservableObject {
                 let snapshot = try await docRef.getDocument()
                 let data = snapshot.data() ?? [:]
                 
-                var follower = data["followerCount"] as? Int
-                var following = data["followingCount"] as? Int
+                var cachedFollower = data["followerCount"] as? Int
+                var cachedFollowing = data["followingCount"] as? Int
                 
-                // If counts are missing, fall back to subcollection counts (slow path)
-                if follower == nil || following == nil {
-                    async let followersTask = fetchFollowerCount(for: userId)
-                    async let followingTask = fetchFollowingCount(for: userId)
-                    
-                    let fetchedFollowers = try? await followersTask
-                    let fetchedFollowing = try? await followingTask
-                    
-                    if follower == nil { follower = fetchedFollowers }
-                    if following == nil { following = fetchedFollowing }
-                    
-                    // Backfill counts to the user document for faster future loads
+                // ALWAYS fetch from subcollections to ensure accurate counts
+                // The subcollections are the source of truth
+                async let followersTask = fetchFollowerCount(for: userId)
+                async let followingTask = fetchFollowingCount(for: userId)
+                
+                let actualFollowers = await followersTask
+                let actualFollowing = await followingTask
+                
+                print("📊 [loadFollowCounts] User: \(userId)")
+                print("   Cached: followers=\(cachedFollower ?? -1), following=\(cachedFollowing ?? -1)")
+                print("   Actual: followers=\(actualFollowers), following=\(actualFollowing)")
+                
+                // Use actual counts from subcollections (source of truth)
+                let follower = actualFollowers
+                let following = actualFollowing
+                
+                // Update the cached counts if they're different
+                if cachedFollower != follower || cachedFollowing != following {
+                    print("🔄 [loadFollowCounts] Updating stale cached counts")
                     var updates: [String: Any] = [:]
-                    if let follower = follower { updates["followerCount"] = follower }
-                    if let following = following { updates["followingCount"] = following }
-                    if !updates.isEmpty {
-                        try? await docRef.setData(updates, merge: true)
-                    }
+                    updates["followerCount"] = follower
+                    updates["followingCount"] = following
+                    try? await docRef.setData(updates, merge: true)
                 }
                 
                 await MainActor.run {
-                    self.followerCount = follower ?? 0
-                    self.followingCount = following ?? 0
+                    self.followerCount = follower
+                    self.followingCount = following
                     self.isLoadingCounts = false
                     print("✅ Loaded counts - Followers: \(self.followerCount), Following: \(self.followingCount)")
                 }

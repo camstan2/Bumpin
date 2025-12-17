@@ -52,16 +52,25 @@ final class DirectMessageService {
         let sortedIds = participantIds.sorted()
         let participantKey = Conversation.makeParticipantKey(sortedIds)
         
+        // For 1:1 conversations, try to find an existing one
         if sortedIds.count == 2 {
-            let snapshot = try await db.collection("conversations")
-                .whereField("participantKey", isEqualTo: participantKey)
-                .limit(to: 1)
-                .getDocuments()
-            if let existing = snapshot.documents.compactMap({ try? $0.data(as: Conversation.self) }).first {
-                return existing
+            do {
+                let snapshot = try await db.collection("conversations")
+                    .whereField("participantKey", isEqualTo: participantKey)
+                    .limit(to: 1)
+                    .getDocuments()
+                if let existing = snapshot.documents.compactMap({ try? $0.data(as: Conversation.self) }).first {
+                    print("✅ Found existing conversation: \(existing.id)")
+                    return existing
+                }
+            } catch {
+                // Query may fail due to Firestore security rules on collection queries
+                // This is expected when no conversation exists yet - proceed to create one
+                print("⚠️ Could not query existing conversations (expected for new chats): \(error.localizedDescription)")
             }
         }
         
+        print("📝 Creating new conversation with participants: \(sortedIds)")
         return try await createConversation(
             participantIds: sortedIds,
             participantKey: participantKey,
@@ -107,8 +116,20 @@ final class DirectMessageService {
             conversationType: type
         )
         
-        try docRef.setData(from: conversation)
-        return conversation
+        print("📝 Creating conversation document: \(docRef.documentID)")
+        print("   Participants: \(participantIds)")
+        print("   ParticipantKey: \(participantKey)")
+        print("   InboxFor: \(meta.inbox)")
+        print("   RequestFor: \(meta.requests)")
+        
+        do {
+            try docRef.setData(from: conversation)
+            print("✅ Conversation created successfully: \(docRef.documentID)")
+            return conversation
+        } catch {
+            print("❌ Failed to create conversation: \(error.localizedDescription)")
+            throw error
+        }
     }
     
     // MARK: - Messaging

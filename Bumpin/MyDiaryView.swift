@@ -64,6 +64,7 @@ struct MyDiaryView: View {
                         }
                     )
                 }
+                .navigationViewStyle(.stack)
             }
             .sheet(isPresented: $showingEditView) {
                 if let log = logToEdit {
@@ -75,6 +76,7 @@ struct MyDiaryView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
     
     private func fetchLogs() {
@@ -267,6 +269,7 @@ struct LogDetailViewLegacy: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
         .onAppear {
             if showingComments {
                 loadComments()

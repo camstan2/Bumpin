@@ -70,7 +70,7 @@ struct ContentView: View {
                                     .foregroundColor(.purple)
                                 }
                             }
-                    })
+                    }.navigationViewStyle(.stack))
                     hosting.modalPresentationStyle = .fullScreen
                     if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                        let window = scene.windows.first,

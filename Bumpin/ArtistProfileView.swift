@@ -208,6 +208,7 @@ struct ArtistProfileView: View {
                 }
             }
     } // Close NavigationView
+        .navigationViewStyle(.stack)
         .sheet(isPresented: $showingSortOptions) {
             sortOptionsSheet
         }
@@ -461,6 +462,7 @@ struct ArtistProfileView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
     
     // MARK: - Filter Options Sheet
@@ -513,6 +515,7 @@ struct ArtistProfileView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
     
     // MARK: - Enhanced Albums Section

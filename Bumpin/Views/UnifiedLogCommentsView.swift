@@ -733,14 +733,35 @@ struct UnifiedLogCommentsView: View {
     private func loadLogEngagement() {
         guard let currentUserId = Auth.auth().currentUser?.uid else { return }
         
-        // Set initial counts from log
+        // Set initial counts from log (will be updated with fresh data from Firestore)
         likeCount = log.likeCount ?? 0
         thumbsDownCount = log.thumbsDownCount ?? 0
         repostCount = log.repostCount ?? 0
         
-        // Check if current user has engaged with this log
+        // Fetch latest counts and user engagement status from Firestore
         Task {
             let db = Firestore.firestore()
+            
+            // Fetch the latest log document to get accurate counts
+            do {
+                let logDoc = try await db.collection("logs").document(log.id).getDocument()
+                if let data = logDoc.data() {
+                    let freshLikeCount = data["likeCount"] as? Int ?? 0
+                    let freshThumbsDownCount = data["thumbsDownCount"] as? Int ?? 0
+                    let freshRepostCount = data["repostCount"] as? Int ?? 0
+                    
+                    await MainActor.run {
+                        self.likeCount = freshLikeCount
+                        self.thumbsDownCount = freshThumbsDownCount
+                        self.repostCount = freshRepostCount
+                    }
+                    
+                    print("📊 [loadLogEngagement] Fresh counts - likes: \(freshLikeCount), thumbsDown: \(freshThumbsDownCount), reposts: \(freshRepostCount)")
+                }
+            } catch {
+                print("⚠️ [loadLogEngagement] Could not fetch fresh counts: \(error.localizedDescription)")
+                // Continue with stale counts from log object
+            }
             
             // Check for like
             let likeDoc = try? await db.collection("logs")

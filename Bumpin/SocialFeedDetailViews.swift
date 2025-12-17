@@ -85,6 +85,7 @@ struct FriendsPopularDetailView: View {
             }
             .onScrollNearBottom(perform: loadMore)
         }
+        .navigationViewStyle(.stack)
     }
     private func loadMore() {
         guard !isLoadingMore else { return }
@@ -157,6 +158,7 @@ struct TrendingDetailView: View {
             }
             .onScrollNearBottom(perform: loadMore)
         }
+        .navigationViewStyle(.stack)
     }
 
     private func loadMore() {
@@ -264,6 +266,7 @@ struct CombinedTrendingDetailView: View {
             }
             .onScrollNearBottom(perform: loadMore)
         }
+        .navigationViewStyle(.stack)
     }
 
     private func loadMore() {
@@ -563,6 +566,7 @@ struct TrendingItemDetailView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
         .onAppear {
             loadRelatedLogs()
         }
@@ -659,6 +663,7 @@ struct FriendsActivityDetailView: View {
             }
             .onScrollNearBottom(perform: loadMore)
         }
+        .navigationViewStyle(.stack)
     }
 
     private func loadFollowingIds() async {
@@ -1026,6 +1031,7 @@ struct NowPlayingCreatorCard: View {
                         }
                     }
             }
+            .navigationViewStyle(.stack)
         }
         .sheet(isPresented: $showPosts) {
             CreatorLogsListView(userId: user.uid, displayName: user.displayName)
@@ -1116,6 +1122,7 @@ struct NowPlayingFriendCard: View {
                         }
                     }
             }
+            .navigationViewStyle(.stack)
         }
         .fullScreenCover(item: $selectedSong) { musicItem in
             MusicProfileView(musicItem: musicItem, pinnedLog: nil)
@@ -1137,6 +1144,7 @@ struct FriendsNowPlayingListView: View {
             .navigationTitle("Listening now")
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
         }
+        .navigationViewStyle(.stack)
     }
 }
 
@@ -1226,6 +1234,7 @@ private struct FriendsNowPlayingListRow: View {
                         }
                     }
             }
+            .navigationViewStyle(.stack)
         }
         .fullScreenCover(item: $selectedSong) { musicItem in
             MusicProfileView(musicItem: musicItem, pinnedLog: nil)
@@ -1312,6 +1321,7 @@ struct ExploreCreatorLogsListView: View {
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
             .refreshable { loadMore() }
         }
+        .navigationViewStyle(.stack)
     }
 }
 
@@ -1337,6 +1347,7 @@ struct WeeklyPopularListView: View {
             .onAppear { if logs.isEmpty { logs = initialLogs; lastDateCursor = Date() } }
             .onScrollNearBottom(perform: loadMore)
         }
+        .navigationViewStyle(.stack)
     }
 
     private func loadMore() {
@@ -1403,6 +1414,7 @@ struct CreatorLogsListView: View {
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
             .onAppear { if logs.isEmpty { loadInitial() } }
         }
+        .navigationViewStyle(.stack)
     }
 
     private func loadInitial() {
@@ -2197,6 +2209,7 @@ struct CommentsSheet: View {
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
             .onAppear { AnalyticsService.shared.logComments(action: "open", contentId: log.id); load() }
         }
+        .navigationViewStyle(.stack)
     }
     private func load() {
         isLoading = true
@@ -2511,6 +2524,7 @@ struct GenreLogsListView: View {
                 if isLoading && logs.isEmpty { ProgressView().scaleEffect(1.2) }
             }
         }
+        .navigationViewStyle(.stack)
         .onAppear { Task { await loadInitial() } }
     }
     
@@ -2692,6 +2706,7 @@ struct CreatorsListView: View {
             .navigationTitle("Creators")
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } } }
         }
+        .navigationViewStyle(.stack)
     }
 }
 

@@ -817,7 +817,10 @@ struct ComprehensiveSearchView: View {
                     }
                 }
             }
+                .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure content fills available space on iPad
         }
+            .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure VStack fills available space on iPad
+            .background(Color(.systemGroupedBackground)) // Consistent background
             .navigationTitle(promptSelectionMode ? "Select Song" : (listSelectionMode ? "Add Songs" : (listenLaterSelectionMode ? "Add to Listen Later" : (pinnedSelectionMode ? "Add \(pinnedItemType.capitalized)s" : ""))))
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarHidden(!promptSelectionMode && !listSelectionMode && !listenLaterSelectionMode && !pinnedSelectionMode)
@@ -925,6 +928,7 @@ struct ComprehensiveSearchView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
     
     // MARK: - Toolbar Content
@@ -1314,7 +1318,9 @@ struct ComprehensiveSearchView: View {
                         .transition(.opacity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure content fills available space on iPad
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure tab fills available space on iPad
     }
 
     // MARK: - Inline searching overlay (keeps header and pills fixed)
@@ -2097,6 +2103,23 @@ struct ComprehensiveSearchView: View {
     private var searchResultsView: some View {
         ScrollView {
             LazyVStack(spacing: 16) {
+                // Show "no results" message when search returns empty
+                if getFilteredResults().isEmpty && !isLoading {
+                    VStack(spacing: 16) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 50))
+                            .foregroundColor(.secondary)
+                        Text("No results found")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                        Text("Try a different search term or filter")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 60)
+                }
+                
                 ForEach(getFilteredResults(), id: \.id) { result in
                     if listenLaterSelectionMode {
                         // Listen Later selection mode: show colored checkmarks based on type
@@ -2475,42 +2498,11 @@ struct ComprehensiveSearchView: View {
             return SearchResults()
         }
         
-        // Search Apple Music catalog
-        var request = MusicCatalogSearchRequest(term: query, types: [MusicKit.Song.self, MusicKit.Artist.self, MusicKit.Album.self])
-        request.limit = 25
-        
-        let response = try await request.response()
-                
         // Helper to normalize titles for deduplication
         func normalizeTitle(_ title: String) -> String {
             return title.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
-        // Process songs with deduplication
-        var songResults: [any SearchResult] = []
-        var seenSongs: Set<String> = []
-        
-        for song in response.songs {
-            let normalizedTitle = normalizeTitle(song.title)
-            let normalizedArtist = normalizeTitle(song.artistName)
-            let key = "\(normalizedTitle)|\(normalizedArtist)"
-            
-            if !seenSongs.contains(key) {
-                seenSongs.insert(key)
-                songResults.append(MusicSongResult(from: song))
-            }
-        }
-        
-        // Process artists
-        let artistResults: [any SearchResult] = response.artists.map { artist in
-            MusicArtistResult(from: artist)
-        }
-        
-        // Process albums
-        // Deduplicate albums similar to songs
-        var albumResults: [any SearchResult] = []
-        var seenAlbums: Set<String> = []
-
         func normalizeAlbumTitle(_ title: String) -> String {
             // Basic normalization + removal of edition qualifiers
             var t = normalizeTitle(title)
@@ -2518,18 +2510,56 @@ struct ComprehensiveSearchView: View {
             t = t.replacingOccurrences(of: "\\s*-\\s*(single|ep|deluxe|clean|explicit|expanded|edition|version|remaster(ed)?|anniversary|special|limited|bonus)\\s*$", with: "", options: .regularExpression)
             return t.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-
-        for album in response.albums {
-            let normTitle = normalizeAlbumTitle(album.title)
-            let normArtist = normalizeTitle(album.artistName)
-            let key = "\(normTitle)|\(normArtist)"
-            if !seenAlbums.contains(key) {
-                seenAlbums.insert(key)
-                albumResults.append(MusicAlbumResult(from: album))
+        
+        var songResults: [any SearchResult] = []
+        var artistResults: [any SearchResult] = []
+        var albumResults: [any SearchResult] = []
+        
+        // Try Apple Music search - but don't fail if MusicKit is unavailable
+        do {
+            var request = MusicCatalogSearchRequest(term: query, types: [MusicKit.Song.self, MusicKit.Artist.self, MusicKit.Album.self])
+            request.limit = 25
+            
+            let response = try await request.response()
+            
+            // Process songs with deduplication
+            var seenSongs: Set<String> = []
+            for song in response.songs {
+                let normalizedTitle = normalizeTitle(song.title)
+                let normalizedArtist = normalizeTitle(song.artistName)
+                let key = "\(normalizedTitle)|\(normalizedArtist)"
+                
+                if !seenSongs.contains(key) {
+                    seenSongs.insert(key)
+                    songResults.append(MusicSongResult(from: song))
+                }
             }
+            
+            // Process artists
+            artistResults = response.artists.map { artist in
+                MusicArtistResult(from: artist)
+            }
+            
+            // Process albums with deduplication
+            var seenAlbums: Set<String> = []
+            for album in response.albums {
+                let normTitle = normalizeAlbumTitle(album.title)
+                let normArtist = normalizeTitle(album.artistName)
+                let key = "\(normTitle)|\(normArtist)"
+                if !seenAlbums.contains(key) {
+                    seenAlbums.insert(key)
+                    albumResults.append(MusicAlbumResult(from: album))
+                }
+            }
+            
+            print("✅ Apple Music search succeeded: \(songResults.count) songs, \(artistResults.count) artists, \(albumResults.count) albums")
+        } catch {
+            // MusicKit failed (e.g., on simulator) - continue with user search only
+            print("⚠️ Apple Music search failed (MusicKit unavailable): \(error.localizedDescription)")
+            print("   Continuing with user search only...")
         }
         
-        // Search users in Firestore
+        // ALWAYS search users in Firestore - even if MusicKit fails
         let userResults = await searchUsers(query: query)
         
         // Create results structure
@@ -2539,13 +2569,23 @@ struct ComprehensiveSearchView: View {
         results.albums = albumResults
         results.users = userResults
         
+        print("📊 searchAppleMusic results for '\(query)':")
+        print("   🎵 Songs: \(songResults.count)")
+        print("   💿 Albums: \(albumResults.count)")
+        print("   🎤 Artists: \(artistResults.count)")
+        print("   👥 Users: \(userResults.count)")
+        print("   📋 Total: \(results.all.count)")
+        
         return results
     }
     
     private func searchUsers(query: String) async -> [any SearchResult] {
         guard let currentUserId = Auth.auth().currentUser?.uid else {
+            print("⚠️ searchUsers: No authenticated user found - skipping user search")
             return []
         }
+        
+        print("🔍 searchUsers: Starting search for '\(query)' (currentUserId: \(currentUserId))")
         
         let normalizedQuery = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else {
@@ -2578,19 +2618,33 @@ struct ComprehensiveSearchView: View {
         }
         
         do {
-            // Search by username (starts with query)
-            let usernameSnapshot = try await db.collection("users")
+            // Search by username (lowercase) - for usernames stored in lowercase
+            let usernameSnapshotLower = try await db.collection("users")
                 .whereField("username", isGreaterThanOrEqualTo: normalizedQuery)
                 .whereField("username", isLessThan: normalizedQuery + "\u{f8ff}")
                 .limit(to: 20)
                 .getDocuments()
             
-            let usernameUsers = usernameSnapshot.documents.compactMap { doc -> UserProfile? in
+            let usernameUsersLower = usernameSnapshotLower.documents.compactMap { doc -> UserProfile? in
                 try? doc.data(as: UserProfile.self)
             }
-            allUsers.append(contentsOf: usernameUsers)
+            allUsers.append(contentsOf: usernameUsersLower)
             
-            // Search by displayName (case-insensitive, starts with query)
+            // Search by username (original case) - for usernames stored with original casing
+            if query != normalizedQuery {
+                let usernameSnapshotOriginal = try await db.collection("users")
+                    .whereField("username", isGreaterThanOrEqualTo: query)
+                    .whereField("username", isLessThan: query + "\u{f8ff}")
+                    .limit(to: 20)
+                    .getDocuments()
+                
+                let usernameUsersOriginal = usernameSnapshotOriginal.documents.compactMap { doc -> UserProfile? in
+                    try? doc.data(as: UserProfile.self)
+                }
+                allUsers.append(contentsOf: usernameUsersOriginal)
+            }
+            
+            // Search by displayName (original case)
             let displayNameSnapshot = try await db.collection("users")
                 .whereField("displayName", isGreaterThanOrEqualTo: query)
                 .whereField("displayName", isLessThan: query + "\u{f8ff}")
@@ -2601,6 +2655,20 @@ struct ComprehensiveSearchView: View {
                 try? doc.data(as: UserProfile.self)
             }
             allUsers.append(contentsOf: displayNameUsers)
+            
+            // Search by displayName (lowercase) - for additional matches
+            if query != normalizedQuery {
+                let displayNameSnapshotLower = try await db.collection("users")
+                    .whereField("displayName", isGreaterThanOrEqualTo: normalizedQuery)
+                    .whereField("displayName", isLessThan: normalizedQuery + "\u{f8ff}")
+                    .limit(to: 20)
+                    .getDocuments()
+                
+                let displayNameUsersLower = displayNameSnapshotLower.documents.compactMap { doc -> UserProfile? in
+                    try? doc.data(as: UserProfile.self)
+                }
+                allUsers.append(contentsOf: displayNameUsersLower)
+            }
             
             // Remove duplicates and current user
             var seenUserIds: Set<String> = []

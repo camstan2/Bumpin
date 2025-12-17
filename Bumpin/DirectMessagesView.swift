@@ -145,6 +145,7 @@ struct DMInboxView: View {
                 }
                 .navigationTitle("New Message")
             }
+            .navigationViewStyle(.stack)
         }
     }
 
@@ -973,7 +974,7 @@ struct ConversationView: View, Identifiable {
         VStack(spacing: 0) {
             Divider()
             
-            HStack {
+            HStack(spacing: 12) {
                 // Text Input
                 TextField("Type a message...", text: $text, axis: .vertical)
                     .font(.system(size: 16))
@@ -985,12 +986,19 @@ struct ConversationView: View, Identifiable {
                             .fill(Color(.systemGray6))
                     )
                     .onChange(of: text) { _, _ in handleTyping() }
-                    .onSubmit {
-                        if canSend {
-                            send()
-                        }
+                
+                // Send Button
+                Button(action: {
+                    if canSend {
+                        send()
                     }
-                    .submitLabel(.send)
+                }) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 34))
+                        .foregroundColor(canSend ? .purple : Color(.systemGray4))
+                }
+                .disabled(!canSend)
+                .animation(.easeInOut(duration: 0.15), value: canSend)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)

@@ -1169,6 +1169,7 @@ struct GenreSettingsView: View {
                 }
             }
         }
+        .navigationViewStyle(.stack)
     }
 }
 

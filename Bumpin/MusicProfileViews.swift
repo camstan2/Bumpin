@@ -412,6 +412,7 @@ struct MusicProfileView: View {
                     }
                 }
             }
+            .navigationViewStyle(.stack)
         }
         .alert("Delete Comment", isPresented: $showingDeleteAlert) {
             Button("Cancel", role: .cancel) {
@@ -466,6 +467,7 @@ struct MusicProfileView: View {
                     }
                 }
             }
+            .navigationViewStyle(.stack)
         }
         .sheet(isPresented: $showingReplySheet) {
             NavigationView {
@@ -586,6 +588,7 @@ struct MusicProfileView: View {
                     }
                 }
             }
+            .navigationViewStyle(.stack)
         }
         .navigationTitle(musicItem.title)
         .navigationBarTitleDisplayMode(.large)
@@ -615,6 +618,7 @@ struct MusicProfileView: View {
             }
         }
         }
+        .navigationViewStyle(.stack)
         .onAppear {
             loadProfile()
             loadFriendIds()

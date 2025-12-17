@@ -110,6 +110,8 @@ struct UserProfileView: View {
     @State private var showAddToListenLater = false
     @State private var selectedListenLaterTab = 0
     @State private var selectedConversation: Conversation? = nil
+    @State private var isStartingConversation = false
+    @State private var conversationError: String? = nil
     @State private var showingSettings = false
     @State private var showBlockedUsers = false
     @State private var showReportsAdmin = false
@@ -564,6 +566,13 @@ struct UserProfileView: View {
         } message: {
             Text(alertMessage)
         }
+        .onChange(of: conversationError) { _, newValue in
+            if let error = newValue {
+                alertMessage = "Could not start conversation: \(error)"
+                showAlert = true
+                conversationError = nil
+            }
+        }
         .alert("Delete Log", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
                 logToDelete = nil
@@ -639,6 +648,7 @@ struct UserProfileView: View {
                         }
                     }
             }
+            .navigationViewStyle(.stack)
         }
         .sheet(isPresented: $showReportsAdmin) {
             AdminReportsView()
@@ -2421,21 +2431,40 @@ struct UserProfileView: View {
                         
             // Message button
                         Button(action: {
-                            guard let target = userId else { return }
-                            DirectMessageService.shared.getOrCreateConversation(with: target) { convo, _ in
-                                if let convo = convo {
-                                    DispatchQueue.main.async { self.selectedConversation = convo }
+                            guard let target = userId, !isStartingConversation else { return }
+                            isStartingConversation = true
+                            conversationError = nil
+                            DirectMessageService.shared.getOrCreateConversation(with: target) { convo, error in
+                                DispatchQueue.main.async {
+                                    isStartingConversation = false
+                                    if let error = error {
+                                        conversationError = error.localizedDescription
+                                        print("❌ Error starting conversation: \(error.localizedDescription)")
+                                        return
+                                    }
+                                    if let convo = convo {
+                                        self.selectedConversation = convo
+                                    }
                                 }
                             }
                         }) {
-                                Text("Message")
-                                    .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.purple)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 44)
-                        .background(Color.purple.opacity(0.1))
-                        .cornerRadius(22)
-            }
+                            HStack(spacing: 8) {
+                                if isStartingConversation {
+                                    ProgressView()
+                                        .scaleEffect(0.8)
+                                        .tint(.purple)
+                                } else {
+                                    Text("Message")
+                                        .font(.system(size: 16, weight: .semibold))
+                                }
+                            }
+                            .foregroundColor(.purple)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .background(Color.purple.opacity(0.1))
+                            .cornerRadius(22)
+                        }
+                        .disabled(isStartingConversation)
             
             // More menu
                         Menu {
@@ -5020,6 +5049,7 @@ struct StatDetailListView: View {
             }
             .background(Color(.systemGroupedBackground))
         }
+        .navigationViewStyle(.stack)
         .fullScreenCover(item: $selectedMusicItem) { musicItem in
             MusicProfileView(musicItem: musicItem, pinnedLog: selectedPinnedLog)
         }
@@ -5923,6 +5953,7 @@ struct ArtistLogListView: View {
             }
             .background(Color(.systemGroupedBackground))
         }
+        .navigationViewStyle(.stack)
     }
 }
 
